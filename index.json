@@ -12,7 +12,7 @@
       },
       "versions": {
         "0.1.0": {
-          "url": "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPOSITORY/main/pool/com.local.message-logger@0.1.0.zip",
+          "url": "https://raw.githubusercontent.com/kimteayoung1202/messageloggerv2-revenge/main/pool/com.local.message-logger@0.1.0.zip",
           "sha256": "86430eed0caf2ebf0cf945a947e87666f1b00d6f5b27b827909efbadb5fb202c",
           "size": 3351,
           "dependencies": {
