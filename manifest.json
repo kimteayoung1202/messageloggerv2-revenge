@@ -1,15 +1,13 @@
 {
-  "name": "Persistent Message Logger",
-  "description": "수신 메시지·모든 수정 이력·삭제 메시지 및 로컬 첨부 보관",
-  "authors": [
-    {
-      "name": "Zipjoa"
-    }
-  ],
-  "main": "index.js",
-  "hash": "6b0a31eaff035ae8336a54995e0706685707b569dd386497f96bed9148752ba6",
-  "vendetta": {
-    "icon": "ic_chat_24px"
+  "format": 1,
+  "id": "com.local.message-logger",
+  "name": "Message Logger",
+  "description": "Local deleted-message and edit history for messages seen on this device.",
+  "author": "Local",
+  "version": "0.1.0",
+  "dependencies": {
+    "revenge.api": { "version": ">=1 <2" },
+    "discord": { "version": "*" }
   },
-  "version": "0.2.0"
+  "dist": { "script": "index.js" }
 }
