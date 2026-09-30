@@ -1,14 +1,15 @@
 {
   "name": "Persistent Message Logger",
-  "description": "수신 메시지·수정 이력·삭제 메시지 및 로컬 첨부 보관 (실험 버전)",
+  "description": "수신 메시지·모든 수정 이력·삭제 메시지 및 로컬 첨부 보관",
   "authors": [
     {
       "name": "Zipjoa"
     }
   ],
   "main": "index.js",
-  "hash": "3cf0624431ec61822412bd1122a0d80bc17a16a09627f61f8ed8ec7995d84957",
+  "hash": "6b0a31eaff035ae8336a54995e0706685707b569dd386497f96bed9148752ba6",
   "vendetta": {
     "icon": "ic_chat_24px"
-  }
+  },
+  "version": "0.2.0"
 }
