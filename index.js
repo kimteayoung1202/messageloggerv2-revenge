@@ -494,6 +494,7 @@ module.exports={Journal,MediaCache,allowedUrl,fetchData};
 "./plugin":function(module,exports,require){
 'use strict';
 const {clone}=require('./core');
+const {normalizeMessage}=require('./mobile');
 const {Engine}=require('./engine');
 const {createUI}=require('./ui');
 const {Journal,MediaCache,fetchData}=require('./io');
@@ -519,7 +520,10 @@ function createPlugin(api,definePlugin) {
   function rawMessage(e) {
     const raw=e?.message||e;if(!raw)return null;
     const channel=raw.channel_id||raw.channelId||e.channelId||e.channel_id;
-    return {...raw,type:raw.type??archive?.lookup(raw.id)?.type??previous(raw.id,channel)?.type??0,channel_id:channel,guild_id:raw.guild_id||raw.guildId||stores.ChannelStore?.getChannel?.(channel)?.guild_id};
+    const old=archive?.lookup(raw.id)||previous(raw.id,channel);
+    const out=normalizeMessage(raw,channel,old,e.type);if(!out)return raw;
+    out.guild_id=raw.guild_id||raw.guildId||stores.ChannelStore?.getChannel?.(channel)?.guild_id;
+    return out;
   }
   function localAttachments(message){const out=clone(message);for(const attachment of out.attachments||[]){const uri=media?.index[attachment.id]?.localUri;if(uri){attachment.url=uri;attachment.proxy_url=uri;}}return out;}
   function previous(messageId,channel){try{return stores.MessageStore?.getMessage?.(channel,messageId);}catch(_){return null;}}
@@ -534,6 +538,7 @@ function createPlugin(api,definePlugin) {
     if(item.type==='changed')save();
     else if(item.type==='cacheMedia')cacheAttachments(item.message);
     else if(item.type==='selfTest')lastTest=Date.now();
+    else if(item.type==='refresh')Promise.resolve().then(()=>{if(started)refreshChat(item.messageId);});
     else if(item.type==='prefetch'&&fetchActions?.fetchMessages&&Date.now()-(fetchTimes.get(item.channelId)||0)>10000){
       fetchTimes.set(item.channelId,Date.now());Promise.resolve().then(()=>fetchActions.fetchMessages({channelId:item.channelId,limit:50})).catch(error);
     }else if(item.type==='notification'){
@@ -583,12 +588,42 @@ function createPlugin(api,definePlugin) {
     if(node.props.children!=null)props.children=React.Children.map(node.props.children,c=>colorText(c,color,depth+1));
     return React.cloneElement(node,props);
   }
+  function patchNativeRows(){
+    const wait=api.discord.native?.waitForNativeRows;if(!wait)return;
+    unpatches.push(wait((rows,records)=>{
+      unpatches.push(api.patcher.instead(rows,'generate',function(args,original){
+        const data=args[0],message=data?.message;
+        const r=archive?.records.get(message?.id);
+        if(!started||data?.rowType!==1||!r||!archive.options.inlineEnabled||archive.options.streamMode)return original.apply(this,args);
+        const deleted=archive.canShowDeleted(r),edits=archive.visibleEdits(message.id),modifier=archive.modifiers.get(message.id)||{};
+        let input=data;
+        if(edits.length&&typeof records.createMessageRecord==='function'){
+          // RowManager serializes native text; build a temporary display record.
+          // Persisted raw content and MessageStore contents retain their normal values.
+          const raw=normalizeMessage(message,r.message.channel_id,r.message);
+          const versions=edits.map(v=>v.message.content+(modifier.noSuffix?'':' (수정 이전)'));
+          raw.content=[...versions,...(modifier.editNum==null?[r.message.content]:[])].join('\n');
+          try{input={...data,message:records.createMessageRecord(raw,message.reactions)};}catch(e){diagnostics.nativeHistory=e.message;}
+        }
+        const row=original.apply(this,[input,...args.slice(1)]);
+        if(!row||typeof row!=='object')return row;
+        const color=deleted?archive.options.deletedMessageColor:archive.options.editedMessageColor;
+        const process=RN.processColor||((value)=>value);
+        if((deleted&&!archive.noTint.has(message.id))||edits.length){
+          row.backgroundHighlight={...row.backgroundHighlight,backgroundColor:process(deleted?'#ed424533':'#949ba422'),gutterColor:process(color)};
+        }
+        if(row.message){row.message={...row.message,edited:deleted?'삭제됨':edits.length?'수정 이력 '+r.history.length+'개':row.message.edited};}
+        return row;
+      }));
+      diagnostics.nativeRows='RowManager.generate connected';inlineReady=true;notify();
+    }));
+  }
   function patchInline() {
     // Only patch an identified named export; no scan/string heuristics over every React module.
     const find=api.modules.finders;
     if(!find?.waitForModules||!find.filters?.withProps)return;
     unpatches.push(find.waitForModules(find.filters.withProps('MessageContent'),mod=>{
-      if(inlineReady)return;
+      if(diagnostics.reactContent)return;
       let parent=mod,key='MessageContent';
       if(typeof mod.MessageContent!=='function'&&typeof mod.MessageContent?.type==='function'){
         parent=mod.MessageContent;key='type';
@@ -601,7 +636,7 @@ function createPlugin(api,definePlugin) {
         const r=archive.records.get(message.id);if(!r||!(r.deletedAt||r.history.length))return result;
         try {
           const shown=archive.canShowDeleted(r);const modifier=archive.modifiers.get(message.id)||{};
-          const painted=shown&&!archive.noTint.has(message.id)?(archive.options.useAlternativeDeletedStyle?React.createElement(RN.View,{style:{backgroundColor:'#ed424533'}},result):colorText(result,archive.options.deletedMessageColor)):result;
+          const painted=shown&&!archive.noTint.has(message.id)?(archive.options.useAlternativeDeletedStyle?React.createElement(RN.View,{style:{backgroundColor:'#ed424533'}},result):typeof r.message.content==='string'&&r.message.content.length?React.createElement(RN.Text,{style:{color:archive.options.deletedMessageColor,fontSize:16}},r.message.content):colorText(result,archive.options.deletedMessageColor)):result;
           const children=modifier.editNum==null?[painted]:[];
           if(shown)children.unshift(React.createElement(RN.Text,{key:'deleted',style:{color:'#ed4245',fontSize:11}},'삭제된 메시지'));
           for(const version of archive.visibleEdits(message.id))children.push(React.createElement(RN.Text,{key:'edit-'+version.index,style:{color:archive.options.editedMessageColor,fontSize:13}},version.message.content+(modifier.noSuffix?'':' (수정됨)')));
@@ -609,7 +644,7 @@ function createPlugin(api,definePlugin) {
           return React.createElement(RN.View,null,...children);
         }catch(_){return result;}
       });
-      unpatches.push(undo);inlineReady=true;notify();
+      unpatches.push(undo);diagnostics.reactContent='MessageContent connected';inlineReady=true;notify();
     },{cached:true}));
   }
   function Attachment({attachment}) {
@@ -643,7 +678,7 @@ function createPlugin(api,definePlugin) {
     const logs=archive?.logs(query,kind)||[];
     const header=h(View,null,text('Message Archive',{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
-      text('채팅 표시: '+(inlineReady?'MessageContent 연결됨 · 실기 검증 필요':'이 Discord 빌드의 렌더러를 찾지 못함 — 기록 화면에서 확인'),{color:'#949ba4',fontSize:12}),
+      text('채팅 표시: '+(inlineReady?(diagnostics.nativeRows?'네이티브 RowManager 연결됨':'React MessageContent 연결됨'):'이 Discord 빌드의 렌더러를 찾지 못함 — 기록 화면에서 확인'),{color:'#949ba4',fontSize:12}),
       UI?h(UI.Options):null,
       h(TextInput,{value:query,onChangeText:v=>{setQuery(v);setLimit(archive?.options.renderCap||50);},placeholder:'내용 / 작성자 / 채널 ID 검색',placeholderTextColor:'#949ba4',
         style:{color:'white',backgroundColor:'#232428',padding:10,borderRadius:6,marginVertical:12}}),
@@ -699,6 +734,7 @@ function createPlugin(api,definePlugin) {
         onChange:message=>{if(message)status=message;notify();}});
       await media.start();started=true;stopping=false;diagnostics={inline:'not found',prefetch:'not found'};status='기록 중 · MLV2 기본 필터 사용';
       try {
+        patchNativeRows();
         patchInline();
         patchActions();
         for(const type of ['MESSAGE_CREATE','MESSAGE_UPDATE','MESSAGE_DELETE','MESSAGE_DELETE_BULK','LOAD_MESSAGES_SUCCESS','CHANNEL_SELECT','CONNECTION_OPEN','MESSAGE_LOGGER_V2_SELF_TEST'])on(type,e=>{
@@ -744,6 +780,14 @@ function createStablePlugin(vd,host=globalThis){
   };
   const stores={};
   for(const name of ['UserStore','SelectedChannelStore','ChannelStore','MessageStore','GuildStore','GuildMemberStore','RelationshipStore','UserGuildSettingsStore'])stores[name]=vd.metro.findByStoreName(name);
+  const channelMessages=vd.metro.findByProps('_channelMessages');
+  const messageStore=stores.MessageStore;
+  stores.MessageStore=Object.create(messageStore||null);
+  stores.MessageStore.getMessage=(channel,id)=>{
+    const existing=messageStore?.getMessage?.(channel,id);if(existing)return existing;
+    const list=channelMessages?.get?.(channel)||channelMessages?._channelMessages?.[channel];
+    return list?.get?.(id)||list?._map?.[id]||list?._array?.find(m=>m.id===id);
+  };
   const handlers=new Map();let dispatchUndo;
   function subscribe(type,cb){
     handlers.set(type,cb);
@@ -766,8 +810,18 @@ function createStablePlugin(vd,host=globalThis){
     }
     scan();return()=>{canceled=true;clearTimeout(timer);};
   }};
+  function waitForNativeRows(callback){
+    let canceled=false,timer;
+    function scan(){if(canceled)return;
+      const rows=vd.metro.findByName?.('RowManager');
+      const records=vd.metro.findByProps('createMessageRecord','updateMessageRecord');
+      if(typeof rows?.prototype?.generate==='function'&&records){callback(rows.prototype,records);return;}
+      timer=setTimeout(scan,1000);
+    }
+    scan();return()=>{canceled=true;clearTimeout(timer);};
+  }
   const api={react:{React:common.React,ReactNative:common.ReactNative},
-    discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe},common:{flux:{Dispatcher:common.FluxDispatcher}},native:{FileModule:nativeFile},
+    discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe},common:{flux:{Dispatcher:common.FluxDispatcher}},native:{FileModule:nativeFile,waitForNativeRows},
       actions:{ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},
     patcher:{instead:(parent,key,cb)=>patcher.instead(key,parent,cb)},
@@ -790,5 +844,25 @@ function createStablePlugin(vd,host=globalThis){
   };
 }
 module.exports={createStablePlugin};
+
+},
+"./mobile":function(module,exports,require){
+'use strict';
+const {snapshot}=require('./core');
+function normalizeMessage(raw,channelId,old,type){
+  if(!raw)return null;
+  const channel=raw.channel_id||raw.channelId||channelId;
+  const out=snapshot(raw,channel);if(!out)return null;
+  out.type=raw.type??old?.type??0;
+  if(raw.state!==undefined)out.state=raw.state;
+  if(raw.editedTimestamp!=null&&out.edited_timestamp==null){
+    const time=raw.editedTimestamp;out.edited_timestamp=typeof time.toISOString==='function'?time.toISOString():time;
+  }
+  // Some native update producers omit the gateway edit timestamp. Only infer
+  // an edit when an existing message's actual text changes, never embed-only updates.
+  if(type==='MESSAGE_UPDATE'&&!out.edited_timestamp&&typeof out.content==='string'&&typeof old?.content==='string'&&out.content!==old.content)out.edited_timestamp=new Date().toISOString();
+  return out;
+}
+module.exports={normalizeMessage};
 
 }};const cache={};function require(id){if(!cache[id]){const m=cache[id]={exports:{}};modules[id](m,m.exports,require);}return cache[id].exports;}return require('./stable').createStablePlugin(vendetta);})()
