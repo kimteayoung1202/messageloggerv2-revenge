@@ -602,7 +602,7 @@ function createPlugin(api,definePlugin) {
     return temporaryIds.has(id)||archive.records.get(id)?.localTemporary
       ||isLocalTemporary(previous(id,channel))||isLocalTemporary(archive.cache.get(id))||isLocalTemporary(archive.records.get(id)?.message);
   }
-  function observeNativeMessage(message){
+  function observeNativeMessage(message,before,source='native'){
     if(isLocalTemporary(message)){markTemporary(message?.id);return;}
     const m=normalizeMessage(message);if(!m||typeof m.content!=='string'||!m.author?.id)return;
     temporaryIds.delete(m.id);
@@ -612,11 +612,10 @@ function createPlugin(api,definePlugin) {
       diagnostics.externalNativeHistorySeen=true;return;
     }
     const record=archive.records.get(m.id);
-    const proven=record&&['event','native'].includes(record.editEvidenceSource)&&Number.isInteger(record.verifiedHistoryStart);
-    const prior=nativeSeen.get(m.id)||(proven?record.message:null);
-    if(record?.history.length&&('editedTimestamp' in message||'edited_timestamp' in message)&&!validEditTime(m.edited_timestamp)){
-      if(Number.isInteger(record.verifiedHistoryStart)){delete record.verifiedHistoryStart;delete record.editEvidenceSource;save();}
-    }
+    const proven=record&&['event','native','record'].includes(record.editEvidenceSource)&&Number.isInteger(record.verifiedHistoryStart);
+    const prior=before&&before.content!==m.content?before:nativeSeen.get(m.id)||(proven?record.message:null);
+    // A render can contain an older or timestamp-less record. It must never
+    // revoke proof from an actual update; only a server load may do that.
     if(prior&&prior.channel_id===m.channel_id&&prior.content!==m.content&&validEditTime(m.edited_timestamp)
       &&Date.parse(m.edited_timestamp)>(Date.parse(prior.edited_timestamp)||0)&&record?.message.content!==m.content){
       // A genuine native edit requires both a changed body and an advancing
@@ -628,9 +627,10 @@ function createPlugin(api,definePlugin) {
       const changed=archive.records.get(m.id);
       if(changed&&changed.history.length>count){
         if(!proven)changed.verifiedHistoryStart=count;
-        changed.editEvidence=m.edited_timestamp;changed.editEvidenceSource='native';
+        changed.editEvidence=m.edited_timestamp;changed.editEvidenceSource=source;
         changed.message.edited_timestamp=m.edited_timestamp;
         diagnostics.nativeObservedEdits=(diagnostics.nativeObservedEdits||0)+1;
+        if(source==='record')diagnostics.nativeRecordEdits=(diagnostics.nativeRecordEdits||0)+1;
       }
       effect(out.effects);
     }
@@ -640,12 +640,33 @@ function createPlugin(api,definePlugin) {
     while(nativeSeen.size>cap)nativeSeen.delete(nativeSeen.keys().next().value);
     while(archive.cache.size>cap)archive.cache.delete(archive.cache.keys().next().value);
   }
+  function patchRecordUpdates(){
+    const find=api.modules.finders;if(!find?.waitForModules)return;
+    unpatches.push(find.waitForModules(find.filters.withProps('createMessageRecord','updateMessageRecord'),records=>{
+      if(typeof records.updateMessageRecord!=='function')return;
+      unpatches.push(api.patcher.instead(records,'updateMessageRecord',function(args,original){
+        // Snapshot before Discord mutates/replaces the old record. This also
+        // captures the first edit when no RowManager render has been observed.
+        const before=started?normalizeMessage(args[0]):null;
+        const result=original.apply(this,args);
+        if(started){
+          diagnostics.nativeRecordUpdatesSeen=(diagnostics.nativeRecordUpdatesSeen||0)+1;
+          try{
+            if(!args[1]?.__vml_edits?.length&&!args[1]?.__vml_restore_edit&&args[1]?.edited_timestamp!=='invalid_timestamp')
+              observeNativeMessage(result,before,'record');
+          }catch(e){diagnostics.nativeRecordError=String(e.message);}
+        }
+        return result;
+      }));
+      diagnostics.nativeRecords='updateMessageRecord connected';notify();
+    },{cached:true}));
+  }
   function patchNativeRows(){
     const wait=api.discord.native?.waitForNativeRows;if(!wait)return;
     unpatches.push(wait((rows,records)=>{
       unpatches.push(api.patcher.instead(rows,'generate',function(args,original){
         const data=args[0],message=data?.message;
-        if(started&&data?.rowType===1)try{observeNativeMessage(message);}catch(e){diagnostics.nativeObservationError=String(e.message);}
+        if(started&&data?.rowType===1)try{diagnostics.nativeRowsGenerated=(diagnostics.nativeRowsGenerated||0)+1;observeNativeMessage(message);}catch(e){diagnostics.nativeObservationError=String(e.message);}
         const r=archive?.records.get(message?.id);
         if(!started||data?.rowType!==1||!r||r.localTemporary||isLocalTemporary(message)||!archive.options.inlineEnabled||archive.options.streamMode)return original.apply(this,args);
         const deleted=archive.canShowDeleted(r),edits=verifiedEdits(archive,message.id),modifier=archive.modifiers.get(message.id)||{};
@@ -653,8 +674,9 @@ function createPlugin(api,definePlugin) {
         if(!generated||typeof generated!=='object')return generated;
         const row={...generated,message:generated.message?{...generated.message}:generated.message};
         if(edits.length&&typeof records.createMessageRecord==='function'){
-          // Parse each version independently. Use only the native edited field
-          // for the small marker; never add marker lines to message content.
+          // Native `edited` is appended once at the very end of a row. For
+          // per-version suffixes use Discord's own subtext node inline after
+          // each old body; its native renderer supplies the small muted span.
           const raw=normalizeMessage(message,r.message.channel_id,r.message);
           const renderContent=content=>{
             const display=records.createMessageRecord({...raw,content},message.reactions);
@@ -663,15 +685,19 @@ function createPlugin(api,definePlugin) {
           try{
             if(Array.isArray(row.message?.content)){
               const parts=[],separator=renderContent('\n');
+              const suffix=modifier.noSuffix?null:renderContent('-# (수정됨)');
+              const subtext=Array.isArray(suffix)?suffix.find(n=>n.type==='subtext'):null;
+              if(!modifier.noSuffix&&!subtext)throw Error('native subtext node unavailable');
               const append=value=>{if(!Array.isArray(value))throw Error('native content array required');parts.push(...value);};
               for(const version of edits){
                 append(renderContent(version.message.content));
-                append(separator);
+                if(subtext)parts.push({...clone(subtext),content:[{type:'text',content:' (수정됨)'}]});
+                else append(separator);
               }
               if(modifier.editNum==null)append(row.message.content);
               row.message.content=parts;
             }else{
-              const versions=edits.map(v=>v.message.content);
+              const versions=edits.map(v=>v.message.content+(modifier.noSuffix?'':' (수정됨)'));
               row.message.content=[...versions,...(modifier.editNum==null?[r.message.content]:[])].join('\n');
             }
           }catch(e){diagnostics.nativeHistory=e.message;}
@@ -704,7 +730,7 @@ function createPlugin(api,definePlugin) {
         if((deleted&&!archive.noTint.has(message.id))||edits.length){
           row.backgroundHighlight={...row.backgroundHighlight,backgroundColor:process(deleted?'#ed424533':'#949ba422'),gutterColor:process(color)};
         }
-        if(row.message){row.message={...row.message,edited:deleted?'삭제됨':edits.length?'수정됨':row.message.edited};}
+        if(row.message){row.message={...row.message,edited:deleted?'삭제됨':edits.length?null:row.message.edited};}
         return row;
       }));
       diagnostics.nativeRows='RowManager.generate connected';inlineReady=true;notify();
@@ -730,11 +756,12 @@ function createPlugin(api,definePlugin) {
         try {
           const shown=archive.canShowDeleted(r);const modifier=archive.modifiers.get(message.id)||{};
           const painted=shown&&!archive.noTint.has(message.id)?(archive.options.useAlternativeDeletedStyle?React.createElement(RN.View,{style:{backgroundColor:'#ed424533'}},result):typeof r.message.content==='string'&&r.message.content.length?React.createElement(RN.Text,{style:{color:archive.options.deletedMessageColor,fontSize:16}},r.message.content):colorText(result,archive.options.deletedMessageColor)):result;
-          const children=modifier.editNum==null?[painted]:[];
+          const children=[];
           if(shown)children.unshift(React.createElement(RN.Text,{key:'deleted',style:{color:'#ed4245',fontSize:11}},'삭제된 메시지'));
           for(const version of verifiedEdits(archive,message.id))children.push(React.createElement(RN.Text,{key:'edit-'+version.index,style:{color:archive.options.editedMessageColor,opacity:0.7}},version.message.content,modifier.noSuffix?null:React.createElement(RN.Text,{style:{color:'#949ba4',fontSize:11,opacity:1}},' (수정됨)')));
+          if(modifier.editNum==null)children.push(painted);
           if(verifiedEdits(archive,message.id).length<Math.max(0,r.history.length-(r.verifiedHistoryStart??r.history.length))&&!r.editsHidden&&archive.options.showEditedMessages)children.push(React.createElement(RN.Pressable,{key:'all',onPress:()=>{archive.modifiers.set(message.id,{showAllEdits:true});refreshChat(message.id);}},React.createElement(RN.Text,{style:{color:'#949ba4'}},'수정 이력 모두 보기')));
-          return React.createElement(RN.View,null,...children);
+          return React.createElement(RN.View,{style:verifiedEdits(archive,message.id).length?{backgroundColor:'#949ba422'}:undefined},...children);
         }catch(_){return result;}
       });
       unpatches.push(undo);diagnostics.reactContent='MessageContent connected';inlineReady=true;notify();
@@ -833,6 +860,7 @@ function createPlugin(api,definePlugin) {
         onChange:message=>{if(message)status=message;notify();}});
       await media.start();nativeSeen.clear();temporaryIds.clear();started=true;stopping=false;diagnostics={inline:'not found',prefetch:'not found',nativeRows:'탐색 대기',nativeTextShape:'아직 수집되지 않음',editEventsSeen:0};status='기록 중 · MLV2 기본 필터 사용';
       try {
+        patchRecordUpdates();
         patchNativeRows();
         patchInline();
         patchActions();
@@ -865,7 +893,7 @@ function createPlugin(api,definePlugin) {
           }
           // Unverified legacy entries are preserved, but may not provide the
           // previous body for a newly confirmed edit.
-          if(type==='MESSAGE_UPDATE'&&priorRecord&&(!Number.isInteger(priorRecord.verifiedHistoryStart)||!['event','native'].includes(priorRecord.editEvidenceSource))&&validEditTime(normalized.message?.edited_timestamp)){
+          if(type==='MESSAGE_UPDATE'&&priorRecord&&(!Number.isInteger(priorRecord.verifiedHistoryStart)||!['event','native','record'].includes(priorRecord.editEvidenceSource))&&validEditTime(normalized.message?.edited_timestamp)){
             const live=normalizeMessage(previous(normalized.message.id,normalized.message.channel_id),normalized.message.channel_id);
             if(typeof live?.content==='string')priorRecord.message.content=live.content;
           }
@@ -873,7 +901,7 @@ function createPlugin(api,definePlugin) {
           if(type==='MESSAGE_UPDATE'&&validEditTime(normalized.message?.edited_timestamp)){
             const record=archive.records.get(normalized.message.id);
             if(record&&record.history.length>priorLength){
-              if(!Number.isInteger(record.verifiedHistoryStart)||!['event','native'].includes(record.editEvidenceSource))record.verifiedHistoryStart=priorLength;
+              if(!Number.isInteger(record.verifiedHistoryStart)||!['event','native','record'].includes(record.editEvidenceSource))record.verifiedHistoryStart=priorLength;
               record.editEvidence=normalized.message.edited_timestamp;record.editEvidenceSource='event';
               record.message.edited_timestamp=normalized.message.edited_timestamp;
             }
@@ -962,7 +990,7 @@ function createStablePlugin(vd,host=globalThis){
     }
     scan();return()=>{canceled=true;clearTimeout(timer);};
   }
-  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.8',react:{React:common.React,ReactNative:common.ReactNative},
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.9',react:{React:common.React,ReactNative:common.ReactNative},
     discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe},common:{flux:{Dispatcher:common.FluxDispatcher}},native:{FileModule:nativeFile,waitForNativeRows},
       actions:{ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},
@@ -1017,7 +1045,7 @@ function validEditTime(value){
 }
 function verifiedEdits(archive,id){
   const r=archive.records.get(id);
-  if(!r||!Number.isInteger(r.verifiedHistoryStart)||!['event','native'].includes(r.editEvidenceSource))return [];
+  if(!r||!Number.isInteger(r.verifiedHistoryStart)||!['event','native','record'].includes(r.editEvidenceSource))return [];
   if(r.editsHidden||!archive.options.showEditedMessages||archive.options.streamMode)return [];
   const modifier=archive.modifiers.get(id)||{};
   const all=r.history.map((v,index)=>({...v,index})).filter(v=>v.index>=r.verifiedHistoryStart);

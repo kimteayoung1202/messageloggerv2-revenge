@@ -1,4 +1,4 @@
-# Message Logger Compatibility 0.4.8 — Revenge 1.11.6
+# Message Logger Compatibility 0.4.9 — Revenge 1.11.6
 
 MessageLoggerV2 1.10.4의 메시지 처리 동작을 기준으로 작성한 독립 구현입니다.
 원본 코드를 포함하거나 재배포하지 않습니다. 공식 MLV2 배포물도 아닙니다.
@@ -7,6 +7,10 @@ MessageLoggerV2 1.10.4의 메시지 처리 동작을 기준으로 작성한 독�
 원본과 같은 입력으로 실제 원본 클래스와 새 엔진을 실행해 **129개 시나리오**를 비교했습니다.
 메시지 상태, 수정 내용 순서, 고스트 핑, 카테고리 인덱스, 카운터, 이벤트 통과/차단, 알림 종류를 비교했습니다.
 이 테스트는 모든 입력의 동등성이나 실제 Android 화면의 성공을 증명하지 않습니다. 자세한 범위는 PARITY.md를 보세요.
+
+0.4.9: 수정 이력을 같은 메시지 안에서 오래된 내용부터 현재 내용 순으로 표시하며 회색 배경을 적용합니다. 이전 버전에만 작은 회색 ` (수정됨)` 접미사를 붙이고, 마지막 내용의 `row.message.edited`는 null로 설정합니다. 네이티브 작은 표시는 Discord가 파싱한 subtext 노드를 이전 본문 바로 뒤에 넣습니다. 원래 edited 필드는 행 끝에 한 번만 표시하는 구조이므로 여러 과거 버전마다 같은 필드를 쓰는 것은 지원하지 않습니다. 네이티브 UI에서의 실제 크기와 줄 배치는 아직 기기 확인이 필요합니다.
+
+수정 수집은 Flux 및 RowManager 관찰에 더해 `updateMessageRecord(oldRecord, newRecord)`의 교체 전 스냅샷을 이용합니다. 화면을 처음 그리기 전의 수정도 이전 본문과 유효한 증가한 수정 시각이 있으면 기록합니다. 확인된 수정 이력을 수정 시각 없는 렌더 입력 때문에 숨기는 경로를 제거합니다. 중복 Flux/레코드/렌더는 같은 이력을 추가하지 않습니다. 전송 대기와 실패 행 제외는 유지합니다. 진단에는 nativeRecords, nativeRecordUpdatesSeen, nativeRecordEdits, nativeRowsGenerated를 추가했습니다.
 
 ## 대상과 설치
 
