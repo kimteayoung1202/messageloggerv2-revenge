@@ -617,13 +617,15 @@ function createNativeSHC(api,getOptions,subscribe,renderHidden,onStatus){
     }catch(e){recordError(e);}
     return original.apply(this,args);
   }));
-  let listConnected=false;const patched=new WeakMap();
+  let listConnected=false,rendererStatus='채널 목록 탐색 중 · 설정 목록 사용 가능';const patched=new WeakMap();
+  const reportConnection=()=>report((listConnected?'ChannelListStore connected · ':'ChannelListStore 탐색 중 · ')+rendererStatus);
   function patchOnce(parent,key,callback){try{if(!parent||typeof parent[key]!=='function')return false;
     let keys=patched.get(parent);if(!keys)patched.set(parent,keys=new Set());if(!keys.has(key)){const unpatch=api.patcher.instead(parent,key,callback);keys.add(key);undo.push(unpatch);}return true;
     }catch(e){recordError(e);return false;}
   }
   function connectStores(){
-  for(const key of ['getGuild','getGuildWithoutChangingGuildActionRows'])if(patchOnce(stores.ChannelListStore,key,function(args,original){
+  let list;try{list=stores.ChannelListStore;}catch(e){recordError(e);}
+  for(const key of ['getGuild','getGuildWithoutChangingGuildActionRows'])if(patchOnce(list,key,function(args,original){
       stats.guildListCalls++;
       const out=original.apply(this,args),source=out?.guildChannels||out;if(!source||typeof source!=='object')return out;
       try{
@@ -648,6 +650,8 @@ function createNativeSHC(api,getOptions,subscribe,renderHidden,onStatus){
   });
   }
   connectStores();
+  const waitStore=api.discord.native?.waitForHiddenChannelStore;
+  if(typeof waitStore==='function')undo.push(waitStore(()=>{if(!active)return true;connectStores();if(!listConnected)return false;refresh(true);reportConnection();return true;}));
   const find=api.modules?.finders;
   if(find?.waitForModules)undo.push(find.waitForModules(find.filters.withProps('fetchMessages','deleteMessage'),actions=>{
     if(!active)return;undo.push(api.patcher.instead(actions,'fetchMessages',function(args,original){
@@ -666,7 +670,7 @@ function createNativeSHC(api,getOptions,subscribe,renderHidden,onStatus){
       if(shown(channelAt(args[0])))return rowHeight(args[0].fontScale);return original.apply(this,args);
     }));
     return()=>{for(const fn of cleanup.reverse())fn();};
-  },message=>{report((listConnected?'ChannelListStore connected · ':'ChannelListStore 없음 · ')+message);}));
+  },message=>{rendererStatus=message;reportConnection();}));
   else report('채널 렌더러 없음 · 설정 목록 사용 가능');
   undo.push(subscribe(()=>refresh(false)));refresh(true);
   return()=>{active=false;for(const fn of undo.reverse())try{fn?.();}catch(e){recordError(e);}refresh(true);};
@@ -1370,9 +1374,9 @@ function createPlugin(api,definePlugin) {
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
     const logs=sortArchiveRows((archive?.logs(query,kind)||[]).filter(r=>!r.localTemporary&&!isLocalTemporary(r.message)&&(kind==='sent'||r.deletedAt||verifiedEdits(archive,r.message.id).length)),archive?.options.oldestActivityFirst===true);
     const proofStats=archive?{verified:[...archive.records.values()].filter(r=>Number.isInteger(r.verifiedHistoryStart)&&r.editEvidenceSource).length,visible:[...archive.records.keys()].filter(id=>verifiedEdits(archive,id).length).length}:undefined;
-    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.5.1',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.5.2',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
     const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
-    const header=h(View,null,text('Revenge All-in-One v'+(api.pluginVersion||'0.5.1'),{fontSize:22,fontWeight:'bold'}),
+    const header=h(View,null,text('Revenge All-in-One v'+(api.pluginVersion||'0.5.2'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
       UI?h(UI.Options):null,
       channelTools?h(channelTools.HiddenSettings):null,
@@ -1539,7 +1543,16 @@ function createStablePlugin(vd,host=globalThis){
   const stores={};
   for(const name of ['UserStore','SelectedChannelStore','SelectedGuildStore','ChannelStore','ChannelListStore','CategoryCollapseStore','ReadStateStore','MessageStore','GuildStore','GuildRoleStore','GuildMemberStore','PermissionStore','RelationshipStore','UserGuildSettingsStore'])stores[name]=vd.metro.findByStoreName(name);
   // These modules may initialize only when the guild sidebar is first opened.
-  for(const name of ['ChannelListStore','CategoryCollapseStore','ReadStateStore'])Object.defineProperty(stores,name,{get:()=>vd.metro.findByStoreName(name),configurable:true});
+  for(const name of ['ChannelListStore','CategoryCollapseStore','ReadStateStore'])Object.defineProperty(stores,name,{get:()=>name==='ChannelListStore'?resolveChannelListStore():vd.metro.findByStoreName(name),configurable:true});
+  function resolveChannelListStore(){
+    // The phone reports a connected renderer but no named ChannelListStore.
+    // Match the sidebar store's unique public methods, not a generic getGuild.
+    try{const named=vd.metro.findByStoreName('ChannelListStore');if(typeof named?.getGuild==='function')return named;}catch(_){}
+    try{
+      const found=vd.metro.findByProps('getGuild','getGuildWithoutChangingGuildActionRows')||vd.metro.findByProps('getGuildWithoutChangingGuildActionRows','recentsChannelCount');
+      for(const candidate of [found,found?.default,found?.ChannelListStore])if(typeof candidate?.getGuild==='function'&&typeof candidate?.getGuildWithoutChangingGuildActionRows==='function')return candidate;
+    }catch(_){}
+  }
   const channelMessages=vd.metro.findByProps('_channelMessages');
   const messageStore=stores.MessageStore;
   stores.MessageStore=Object.create(messageStore||null);
@@ -1622,6 +1635,13 @@ function createStablePlugin(vd,host=globalThis){
     const guildId=message.guild_id||stores.ChannelStore?.getChannel?.(channelId)?.guild_id||'@me';
     return handle.call(linking,{guildId,channelId,messageId,navigationSettings:{navigationReplace:true}});
   }
+  function waitForHiddenChannelStore(callback){
+    let canceled=false,timer,scans=0;
+    function scan(){if(canceled)return;try{const store=resolveChannelListStore();if(store&&callback(store)!==false)return;}catch(_){}
+      timer=setTimeout(scan,++scans<30?1000:30000);
+    }
+    scan();return()=>{canceled=true;clearTimeout(timer);};
+  }
   function waitForHiddenChannelRenderer(callback,onStatus){
     let canceled=false,timer,undo,scans=0;
     function scan(){if(canceled)return;try{
@@ -1639,8 +1659,8 @@ function createStablePlugin(vd,host=globalThis){
     }
     scan();return()=>{canceled=true;clearTimeout(timer);undo?.();};
   }
-  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.5.1',react:{React:common.React,ReactNative:common.ReactNative},
-    discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},permissions:{get constants(){try{return common.constants?.Permissions||{};}catch(_){return {};}}},native:{FileModule:nativeFile,waitForNativeRows,waitForNativeBridge,waitForHiddenChannelRenderer,get createChannelRecord(){return vd.metro.findByProps('createChannelRecord')?.createChannelRecord;}},
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.5.2',react:{React:common.React,ReactNative:common.ReactNative},
+    discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},permissions:{get constants(){try{return common.constants?.Permissions||{};}catch(_){return {};}}},native:{FileModule:nativeFile,waitForNativeRows,waitForNativeBridge,waitForHiddenChannelStore,waitForHiddenChannelRenderer,get createChannelRecord(){return vd.metro.findByProps('createChannelRecord')?.createChannelRecord;}},
       actions:{jumpToMessage,ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},
     patcher:{instead:(parent,key,cb)=>patcher.instead(key,parent,cb)},
