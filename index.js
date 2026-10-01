@@ -529,9 +529,9 @@ function shcSettings(value={}){
 }
 function isHidden(api,channel){
   if(!channel||typeof channel.type!=='number'||[1,3].includes(channel.type)||['browse','customize','guide'].includes(channel.id))return false;
-  const store=api.discord.flux.Stores.PermissionStore,flag=api.discord.permissions?.constants?.VIEW_CHANNEL;
-  if(flag==null||typeof store?.can!=='function')return false;
-  try{return store.can(flag,channel)===false;}catch(_){return false;}
+  try{const store=api.discord.flux.Stores.PermissionStore,flag=api.discord.permissions?.constants?.VIEW_CHANNEL;
+    return flag!=null&&typeof store?.can==='function'&&store.can(flag,channel)===false;
+  }catch(_){return false;}
 }
 function displayEnabled(options,channel){const cfg=shcSettings(options.shc);return options.showHiddenChannels&&!options.streamMode&&!cfg.blacklistedGuilds[channel?.guild_id]&&!!cfg.channels[TYPES[channel?.type]];}
 const copy=source=>Object.assign(Object.create(Object.getPrototypeOf(source)),source);
@@ -596,29 +596,53 @@ function decorateGuild(api,result,options){
 }
 function createNativeSHC(api,getOptions,subscribe,renderHidden,onStatus){
   const stores=api.discord.flux.Stores,undo=[],cache=new WeakMap();let active=true;
+  const stats={guildListCalls:0,hiddenRowsInModel:0,hiddenRowsRendered:0,cachedHiddenChannels:0};
+  const report=message=>onStatus(message,stats);
+  const recordError=e=>{stats.lastError=String(e?.message||e);};
   function options(){return getOptions()||{};}
   const shown=c=>active&&isHidden(api,c)&&displayEnabled(options(),c);
-  function refresh(){cacheClear++;if(active)connectStores();try{stores.ChannelListStore?.emitChange?.();}catch(_){}}
+  let settingsSignature;
+  function refresh(force=false){
+    try{
+      const next=JSON.stringify([options().showHiddenChannels,options().streamMode,options().shc]);
+      if(!force&&next===settingsSignature)return;settingsSignature=next;cacheClear++;
+      if(active)connectStores();stores.ChannelListStore?.emitChange?.();
+    }catch(e){recordError(e);}
+  }
   let cacheClear=0;
   if(typeof stores.ChannelStore?.getChannel==='function')undo.push(api.patcher.instead(stores.ChannelStore,'getChannel',function(args,original){
-    const id=args[0],cfg=shcSettings(options().shc),guildId=typeof id==='string'&&id.endsWith('_hidden')?id.slice(0,-7):null;
-    if(active&&guildId&&options().showHiddenChannels&&!options().streamMode&&cfg.sort==='extra'&&!cfg.blacklistedGuilds[guildId])return hiddenCategoryRecord(api,guildId);
+    const id=args[0],guildId=typeof id==='string'&&id.endsWith('_hidden')?id.slice(0,-7):null;
+    if(guildId)try{const cfg=shcSettings(options().shc);
+      if(active&&options().showHiddenChannels&&!options().streamMode&&cfg.sort==='extra'&&!cfg.blacklistedGuilds[guildId])return hiddenCategoryRecord(api,guildId);
+    }catch(e){recordError(e);}
     return original.apply(this,args);
   }));
   let listConnected=false;const patched=new WeakMap();
-  function patchOnce(parent,key,callback){if(!parent||typeof parent[key]!=='function')return false;
-    let keys=patched.get(parent);if(!keys)patched.set(parent,keys=new Set());if(!keys.has(key)){keys.add(key);undo.push(api.patcher.instead(parent,key,callback));}return true;
+  function patchOnce(parent,key,callback){try{if(!parent||typeof parent[key]!=='function')return false;
+    let keys=patched.get(parent);if(!keys)patched.set(parent,keys=new Set());if(!keys.has(key)){const unpatch=api.patcher.instead(parent,key,callback);keys.add(key);undo.push(unpatch);}return true;
+    }catch(e){recordError(e);return false;}
   }
   function connectStores(){
   for(const key of ['getGuild','getGuildWithoutChangingGuildActionRows'])if(patchOnce(stores.ChannelListStore,key,function(args,original){
+      stats.guildListCalls++;
       const out=original.apply(this,args),source=out?.guildChannels||out;if(!source||typeof source!=='object')return out;
+      try{
+      stats.modelShape={wrapped:!!out?.guildChannels,categories:typeof source.categories,noParentCategory:typeof source.noParentCategory,keys:Object.keys(source).slice(0,30)};
       const signature=JSON.stringify([options().showHiddenChannels,options().streamMode,options().shc,source.version,cacheClear]);
       const last=cache.get(source);if(last?.signature===signature)return out?.guildChannels?{...out,guildChannels:last.guild,guildChannelsVersion:last.guild.version}:last.guild;
-      const result=decorateGuild(api,out,options());cache.set(source,{signature,guild:result?.guildChannels||result});return result;
+      const result=decorateGuild(api,out,options()),guild=result?.guildChannels||result;
+      const categories=[guild.noParentCategory,...Object.values(guild.categories||{}),guild.voiceChannelsCategory,guild.favoritesCategory,guild.recentsCategory].filter(Boolean);
+      const shownIds=new Set(categories.flatMap(c=>Object.values(c.channels||{}).filter(r=>r.renderLevel>=3&&isHidden(api,r.record)&&displayEnabled(options(),r.record)).map(r=>r.id)));
+      stats.hiddenRowsInModel=shownIds.size;
+      const guildId=source.id||args[0];
+      const records=Object.values(stores.ChannelStore?.getMutableGuildChannelsForGuild?.(guildId)||{});
+      stats.cachedHiddenChannels=records.filter(c=>isHidden(api,c)&&displayEnabled(options(),c)).length;
+      cache.set(source,{signature,guild});return result;
+      }catch(e){recordError(e);return out;}
     }))listConnected=true;
-  const read=stores.ReadStateStore;
+  let read;try{read=stores.ReadStateStore;}catch(e){recordError(e);}
   for(const key of ['getGuildChannelUnreadState','getMentionCount','getUnreadCount','hasTrackedUnread','hasUnread','hasUnreadPins'])patchOnce(read,key,function(args,original){
-    const channel=stores.ChannelStore?.getChannel?.(typeof args[0]==='object'?args[0].id:args[0]);
+    const channel=stores.ChannelStore?.getChannel?.(typeof args[0]==='object'?args[0]?.id:args[0]);
     if(shown(channel)&&!shcSettings(options().shc).MarkUnread)return key==='getGuildChannelUnreadState'?{mentionCount:0,unread:false}:key.startsWith('get')?0:false;
     return original.apply(this,args);
   });
@@ -633,19 +657,19 @@ function createNativeSHC(api,getOptions,subscribe,renderHidden,onStatus){
   }));
   const wait=api.discord.native?.waitForHiddenChannelRenderer;
   if(typeof wait==='function')undo.push(wait((parent,key,rowHeight)=>{
-    connectStores();
+    connectStores();refresh(true);
     const channelAt=props=>{try{return props?.guildChannels?.getChannelFromSectionRow?.(props.section,props.row)?.channel?.record;}catch(_){}};
     const cleanup=[api.patcher.instead(parent,key,function(args,original){
-      const channel=channelAt(args[0]);if(shown(channel))return renderHidden(channel);return original.apply(this,args);
+      const channel=channelAt(args[0]);if(shown(channel)){stats.hiddenRowsRendered++;return renderHidden(channel);}return original.apply(this,args);
     })];
     if(typeof rowHeight==='function'&&typeof parent.getChannelListItemSize==='function')cleanup.push(api.patcher.instead(parent,'getChannelListItemSize',function(args,original){
       if(shown(channelAt(args[0])))return rowHeight(args[0].fontScale);return original.apply(this,args);
     }));
     return()=>{for(const fn of cleanup.reverse())fn();};
-  },message=>{onStatus((listConnected?'ChannelListStore connected · ':'ChannelListStore 없음 · ')+message);}));
-  else onStatus('채널 렌더러 없음 · 설정 목록 사용 가능');
-  undo.push(subscribe(refresh));refresh();
-  return()=>{active=false;for(const fn of undo.reverse())fn?.();refresh();};
+  },message=>{report((listConnected?'ChannelListStore connected · ':'ChannelListStore 없음 · ')+message);}));
+  else report('채널 렌더러 없음 · 설정 목록 사용 가능');
+  undo.push(subscribe(()=>refresh(false)));refresh(true);
+  return()=>{active=false;for(const fn of undo.reverse())try{fn?.();}catch(e){recordError(e);}refresh(true);};
 }
 module.exports={TYPES,DEFAULTS,shcSettings,isHidden,displayEnabled,hiddenCategoryRecord,decorateGuild,createNativeSHC};
 
@@ -871,7 +895,7 @@ function createChannelTools(api,getEngine,save,subscribe,status){
       text(typeIcon,{color:'#949ba4',fontSize:18,marginRight:8}),text(channel.name||'이름 정보 없음',{color:'#949ba4',fontSize:16,flex:1}),text(icon,{fontSize:15,color:'#949ba4'})),
       open?h(Detail,{channelId,onClose:()=>setOpen(false)}):null);
   }
-  function connect(){return createNativeSHC(api,()=>options(),subscribe,channel=>h(HiddenRow,{channelId:channel.id}),message=>{status().hiddenChannelList=message;});
+  function connect(){return createNativeSHC(api,()=>options(),subscribe,channel=>h(HiddenRow,{channelId:channel.id}),(message,stats)=>{status().hiddenChannelList=message;status().hiddenChannelStats=stats;});
   }
   return {HiddenSettings,OtherSettings,Browser,Detail,HiddenRow,GuildSettings,connect};
 }
@@ -890,7 +914,8 @@ function createPlugin(api,definePlugin) {
   let React,RN,stores,archive,journal,media,timer,base,UI,channelTools,maintenanceTimer,backupTimer,selfTestTimer,fetchActions,started=false,dirty=false;
   let diagnostics={nativeTextShape:'아직 수집되지 않음'},lastTest=0,stopping=false;const fetchTimes=new Map(),nativeSeen=new Map(),nativeRenderedSeen=new Map(),nativeRecordBefore=new Map(),temporaryIds=new Set(),temporaryRecords=new Map(),nativeContentSeen=new Map(),nativePainted=new Map();
   let status='시작 대기',inlineReady=false,unpatches=[],listeners=new Set();
-  const notify=()=>{for(const cb of listeners)cb();};
+  // Optional UI/channel subscribers must not cancel message capture or saving.
+  const notify=()=>{for(const cb of listeners)try{cb();}catch(e){diagnostics.listenerError=String(e?.message||e);}};
   const error=e=>{status=String(e?.message||e);notify();console.error('[Message Archive]',e);};
   const save=()=>{
     dirty=true;notify();
@@ -1345,9 +1370,9 @@ function createPlugin(api,definePlugin) {
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
     const logs=sortArchiveRows((archive?.logs(query,kind)||[]).filter(r=>!r.localTemporary&&!isLocalTemporary(r.message)&&(kind==='sent'||r.deletedAt||verifiedEdits(archive,r.message.id).length)),archive?.options.oldestActivityFirst===true);
     const proofStats=archive?{verified:[...archive.records.values()].filter(r=>Number.isInteger(r.verifiedHistoryStart)&&r.editEvidenceSource).length,visible:[...archive.records.keys()].filter(id=>verifiedEdits(archive,id).length).length}:undefined;
-    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.5.0',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.5.1',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
     const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
-    const header=h(View,null,text('Revenge All-in-One v'+(api.pluginVersion||'0.5.0'),{fontSize:22,fontWeight:'bold'}),
+    const header=h(View,null,text('Revenge All-in-One v'+(api.pluginVersion||'0.5.1'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
       UI?h(UI.Options):null,
       channelTools?h(channelTools.HiddenSettings):null,
@@ -1419,9 +1444,9 @@ function createPlugin(api,definePlugin) {
         patchNativeBridge();
         patchInline();
         patchActions();
-        try{unpatches.push(channelTools.connect());}catch(e){diagnostics.hiddenChannelList='연결 실패 · 설정 목록 사용 가능: '+String(e.message);}
         for(const type of ['MESSAGE_CREATE','MESSAGE_UPDATE','MESSAGE_DELETE','MESSAGE_DELETE_BULK','LOAD_MESSAGES_SUCCESS','CHANNEL_SELECT','CONNECTION_OPEN','MESSAGE_LOGGER_V2_SELF_TEST'])on(type,e=>{
           syncSelectedChannel();
+          const seen=diagnostics.loggerEvents||(diagnostics.loggerEvents={});seen[type]=(seen[type]||0)+1;
           if(type==='MESSAGE_UPDATE')diagnostics.editEventsSeen++;
           const channel=e.channelId||e.channel_id||e.message?.channel_id||e.message?.channelId;
           if(e.message&&isLocalTemporary(e.message,e)){markTemporary(e.message.id);return e;}
@@ -1479,6 +1504,8 @@ function createPlugin(api,definePlugin) {
         maintenanceTimer=setInterval(()=>{const keep=archive.maintenance();save();if(archive.options.cacheAllImages&&!archive.options.dontDeleteCachedImages)media.prune(keep).catch(error);},300000);
         selfTestTimer=setInterval(()=>{try{api.discord.common?.flux?.Dispatcher?.dispatch?.({type:'MESSAGE_LOGGER_V2_SELF_TEST'});diagnostics.selfTest=Date.now()-lastTest<3000?'passed':'dispatcher unavailable';}catch(e){diagnostics.selfTest=e.message;}notify();},10000);
         if(RN.AppState?.addEventListener){const s=RN.AppState.addEventListener('change',state=>{if(state!=='active')flush().catch(error);});unpatches.push(()=>s.remove());}
+        // Complete logger subscriptions first; channel integration is optional.
+        try{unpatches.push(channelTools.connect());}catch(e){diagnostics.hiddenChannelList='연결 실패 · 메시지로거는 계속 기록: '+String(e.message);}
         notify();
       }catch(e){await lifecycle.stop();throw e;}
     },
@@ -1598,9 +1625,11 @@ function createStablePlugin(vd,host=globalThis){
   function waitForHiddenChannelRenderer(callback,onStatus){
     let canceled=false,timer,undo,scans=0;
     function scan(){if(canceled)return;try{
-      const mod=vd.metro.findByFilePath?.('modules/channel_list_v2/native/renderRedesignChannelListItem.tsx',false);
+      // Revenge's Metro has file-path finders, but its Vendetta compatibility
+      // object does not expose them. Use the actual compatibility API first.
+      const mod=vd.metro.findByProps('renderChannelListItem','getChannelListItemSize')||vd.metro.findByProps('renderChannelListItem')||vd.metro.findByFilePath?.('modules/channel_list_v2/native/renderRedesignChannelListItem.tsx',false);
       if(typeof mod?.renderChannelListItem==='function'){
-        const constants=vd.metro.findByFilePath?.('modules/channel_list_v2/native/RedesignChannelListConstants.tsx',false);
+        const constants=vd.metro.findByProps('getScaledChannelRowHeight')||vd.metro.findByFilePath?.('modules/channel_list_v2/native/RedesignChannelListConstants.tsx',false);
         undo=callback(mod,'renderChannelListItem',constants?.getScaledChannelRowHeight);
         onStatus('숨김 채널 행 connected');return;
       }
@@ -1610,7 +1639,7 @@ function createStablePlugin(vd,host=globalThis){
     }
     scan();return()=>{canceled=true;clearTimeout(timer);undo?.();};
   }
-  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.5.0',react:{React:common.React,ReactNative:common.ReactNative},
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.5.1',react:{React:common.React,ReactNative:common.ReactNative},
     discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},permissions:{get constants(){try{return common.constants?.Permissions||{};}catch(_){return {};}}},native:{FileModule:nativeFile,waitForNativeRows,waitForNativeBridge,waitForHiddenChannelRenderer,get createChannelRecord(){return vd.metro.findByProps('createChannelRecord')?.createChannelRecord;}},
       actions:{jumpToMessage,ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},
