@@ -1,4 +1,4 @@
-# Message Logger Compatibility 0.4.9 — Revenge 1.11.6
+# Message Logger Compatibility 0.4.10 — Revenge 1.11.6
 
 MessageLoggerV2 1.10.4의 메시지 처리 동작을 기준으로 작성한 독립 구현입니다.
 원본 코드를 포함하거나 재배포하지 않습니다. 공식 MLV2 배포물도 아닙니다.
@@ -7,6 +7,10 @@ MessageLoggerV2 1.10.4의 메시지 처리 동작을 기준으로 작성한 독�
 원본과 같은 입력으로 실제 원본 클래스와 새 엔진을 실행해 **129개 시나리오**를 비교했습니다.
 메시지 상태, 수정 내용 순서, 고스트 핑, 카테고리 인덱스, 카운터, 이벤트 통과/차단, 알림 종류를 비교했습니다.
 이 테스트는 모든 입력의 동등성이나 실제 Android 화면의 성공을 증명하지 않습니다. 자세한 범위는 PARITY.md를 보세요.
+
+0.4.10: 실제 네이티브 화면 전송 경로인 `updateRows(viewId, serializedRows, ...)`도 연결합니다. RowManager/Flux/레코드 export가 호출되지 않는 경우에도 전송되는 메시지와 MessageStore의 원본 레코드를 비교하여 유효한 증가한 수정 시각이 있는 변경을 수집합니다. 이전 본문의 네이티브 AST를 관찰한 경우 그 노드를 보존하여 기존 서식을 유지합니다. 이전 내용마다 네이티브 subtext 접미사를 붙이고 회색 배경을 적용하며 마지막 수정 표시를 비웁니다. RowManager와 updateRows가 둘 다 처리하거나 같은 행을 재사용해도 이력을 중복 삽입하지 않습니다. 잘못된 JSON, 다른 데이터 형태, 전송 대기/실패 행은 원래대로 통과합니다.
+
+현재 선택한 채널은 각 이벤트/네이티브 관찰 시 SelectedChannelStore에서 다시 확인합니다. CHANNEL_SELECT를 놓치고 시작 당시 채널만 계속 기록하는 경우를 방지합니다. 설정 첫 화면에 실제 updateRows/RowManager/레코드 갱신 호출 수를 표시하며 진단에는 nativeBridge, nativeBridgeCalls, nativeBridgeMessageRows, nativeBridgeStoreMatches, nativeBridgeHistoriesShown, stats를 추가합니다. 연결 발견과 실제 호출은 구분해야 합니다. 실제 347012 기기의 경로와 결과는 업데이트 후 진단으로 확인해야 합니다. 이전 본문을 관찰하지 못했거나 유효한 수정 시각을 얻지 못하면 이력을 만들지 않습니다.
 
 0.4.9: 수정 이력을 같은 메시지 안에서 오래된 내용부터 현재 내용 순으로 표시하며 회색 배경을 적용합니다. 이전 버전에만 작은 회색 ` (수정됨)` 접미사를 붙이고, 마지막 내용의 `row.message.edited`는 null로 설정합니다. 네이티브 작은 표시는 Discord가 파싱한 subtext 노드를 이전 본문 바로 뒤에 넣습니다. 원래 edited 필드는 행 끝에 한 번만 표시하는 구조이므로 여러 과거 버전마다 같은 필드를 쓰는 것은 지원하지 않습니다. 네이티브 UI에서의 실제 크기와 줄 배치는 아직 기기 확인이 필요합니다.
 
