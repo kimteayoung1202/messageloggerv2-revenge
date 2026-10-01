@@ -62,7 +62,7 @@ const BASE=Object.freeze({ignoreMutedGuilds:true,ignoreMutedChannels:true,ignore
   toastTogglesDMs:{sent:false,edited:true,deleted:true,ghostPings:true},
   // Platform extensions: optional files beyond images, bounded async native IO, streamer visibility.
   cacheOtherFiles:false,maxFileBytes:8*1048576,maxMediaBytes:64*1048576,inlineEnabled:true,
-  streamMode:false});
+  streamMode:false,oldestActivityFirst:false});
 function settings(value={}) {
   const s={...clone(BASE),...value};
   for(const key of ['whitelist','blacklist','notificationBlacklist'])s[key]=Array.isArray(s[key])?s[key].filter(x=>typeof x==='string'):[];
@@ -323,6 +323,21 @@ module.exports={Engine,BASE,settings,normal};
 'use strict';
 const {settings,BASE,Engine}=require('./engine');
 const {importData}=require('./core');
+function archiveActivityTime(record){
+  let newest=0;
+  function include(value){
+    const time=typeof value==='number'?value:typeof value==='string'?(/^\d+$/.test(value)?Number(value):Date.parse(value)):0;
+    if(Number.isFinite(time)&&time>newest)newest=time;
+  }
+  include(record.message?.timestamp);include(record.message?.edited_timestamp);
+  include(record.seenAt);include(record.deletedAt);
+  for(const version of record.history||[])include(version.at);
+  return newest;
+}
+function sortArchiveRows(rows,oldestFirst=false){
+  return rows.map(record=>({record,time:archiveActivityTime(record)}))
+    .sort((a,b)=>(oldestFirst?1:-1)*(a.time-b.time)).map(entry=>entry.record);
+}
 function createUI(api,getEngine,save,refresh,backup,getStatus){
   const React=api.react.React,RN=api.react.ReactNative,h=React.createElement;
   const text=(s,style={})=>h(RN.Text,{style:{color:'#f2f3f5',...style}},s);
@@ -340,7 +355,7 @@ function createUI(api,getEngine,save,refresh,backup,getStatus){
       ...Object.entries({ignoreMutedGuilds:'음소거 서버 제외',ignoreMutedChannels:'음소거 채널 제외',ignoreBots:'봇 제외',ignoreSelf:'본인 제외',ignoreBlockedUsers:'차단 사용자 제외',ignoreNSFW:'NSFW 제외',ignoreLocalEdits:'내 수정 제외',ignoreLocalDeletes:'내 직접 삭제 제외',
         onlyLogWhitelist:'화이트리스트만 기록',alwaysLogSelected:'현재 채널 우선 기록',alwaysLogDM:'DM 우선 기록',alwaysLogGhostPings:'제외 채널 고스트 핑도 기록',
         showDeletedMessages:'채팅에 삭제 표시',showPurgedMessages:'채팅에 일괄 삭제 표시',showEditedMessages:'채팅에 수정 표시',restoreDeletedMessages:'재시작 후 채팅 복원',showDeletedCount:'삭제 개수 알림',showEditedCount:'수정 개수 알림',
-        hideNewerEditsFirst:'오래된 수정부터 표시',displayDates:'날짜 표시',reverseOrder:'오래된 로그부터 정렬',useAlternativeDeletedStyle:'삭제 글자 대신 배경 빨강',
+        hideNewerEditsFirst:'오래된 수정부터 표시',displayDates:'날짜 표시',oldestActivityFirst:'오래된 로그부터 정렬',useAlternativeDeletedStyle:'삭제 글자 대신 배경 빨강',
         dontSaveData:'디스크 저장 끄기',autoBackup:'자동 백업',aggresiveMessageCaching:'50개 캐시 요청',cacheAllImages:'삭제 이미지 로컬 저장',dontDeleteCachedImages:'참조 없는 이미지 유지',
         blockSpamEdit:'수정 알림 제한 해제',useNotificationsInstead:'알림 방식',inlineEnabled:'채팅 표시 연결',streamMode:'스트리머 표시 숨김',cacheOtherFiles:'영상·일반 파일 캐시 확장'}).map(([key,label])=>toggle(label,key)),
       ...['whitelist','blacklist','notificationBlacklist'].map(key=>input(key,true)),
@@ -383,7 +398,7 @@ function createUI(api,getEngine,save,refresh,backup,getStatus){
   }
   return {Options,Actions};
 }
-module.exports={createUI};
+module.exports={createUI,sortArchiveRows};
 
 },
 "./io":function(module,exports,require){
@@ -504,7 +519,7 @@ module.exports={Journal,MediaCache,allowedUrl,fetchData};
 const {clone}=require('./core');
 const {normalizeMessage,validEditTime,editTime,verifiedEdits,isLocalTemporary}=require('./mobile');
 const {Engine}=require('./engine');
-const {createUI}=require('./ui');
+const {createUI,sortArchiveRows}=require('./ui');
 const {Journal,MediaCache,fetchData}=require('./io');
 function createPlugin(api,definePlugin) {
   let React,RN,stores,archive,journal,media,timer,base,UI,maintenanceTimer,backupTimer,selfTestTimer,fetchActions,started=false,dirty=false;
@@ -952,11 +967,11 @@ function createPlugin(api,definePlugin) {
     const button=(name,fn)=>h(Pressable,{key:name,onPress:fn,style:{padding:10,backgroundColor:'#404249',borderRadius:7,margin:3}},text(name));
     const toggle=(label,key)=>h(View,{key,style:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',paddingVertical:6}},
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
-    const logs=(archive?.logs(query,kind)||[]).filter(r=>!r.localTemporary&&!isLocalTemporary(r.message)&&(kind==='sent'||r.deletedAt||verifiedEdits(archive,r.message.id).length));
+    const logs=sortArchiveRows((archive?.logs(query,kind)||[]).filter(r=>!r.localTemporary&&!isLocalTemporary(r.message)&&(kind==='sent'||r.deletedAt||verifiedEdits(archive,r.message.id).length)),archive?.options.oldestActivityFirst===true);
     const proofStats=archive?{verified:[...archive.records.values()].filter(r=>Number.isInteger(r.verifiedHistoryStart)&&r.editEvidenceSource).length,visible:[...archive.records.keys()].filter(id=>verifiedEdits(archive,id).length).length}:undefined;
-    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.14',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.15',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
     const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
-    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.14'),{fontSize:22,fontWeight:'bold'}),
+    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.15'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
       text('실제 화면 호출: updateRows '+(diagnostics.nativeBridgeMessageRows||0)+' · RowManager '+(diagnostics.nativeRowsGenerated||0)+' · 레코드 갱신 '+(diagnostics.nativeRecordUpdatesSeen||0),{color:'#949ba4',fontSize:12}),
       h(View,{style:{flexDirection:'row'}},button('연결 진단 보기',()=>setDiagnosticOpen(true)),button('진단 복사',copyDiagnostic)),
@@ -1196,7 +1211,7 @@ function createStablePlugin(vd,host=globalThis){
     const guildId=message.guild_id||stores.ChannelStore?.getChannel?.(channelId)?.guild_id||'@me';
     return handle.call(linking,{guildId,channelId,messageId,navigationSettings:{navigationReplace:true}});
   }
-  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.14',react:{React:common.React,ReactNative:common.ReactNative},
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.15',react:{React:common.React,ReactNative:common.ReactNative},
     discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},native:{FileModule:nativeFile,waitForNativeRows,waitForNativeBridge},
       actions:{jumpToMessage,ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},
