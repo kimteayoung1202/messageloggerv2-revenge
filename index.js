@@ -62,7 +62,7 @@ const BASE=Object.freeze({ignoreMutedGuilds:true,ignoreMutedChannels:true,ignore
   toastTogglesDMs:{sent:false,edited:true,deleted:true,ghostPings:true},
   // Platform extensions: optional files beyond images, bounded async native IO, streamer visibility.
   cacheOtherFiles:false,maxFileBytes:8*1048576,maxMediaBytes:64*1048576,inlineEnabled:true,
-  streamMode:false,oldestActivityFirst:false});
+  streamMode:false,oldestActivityFirst:false,showHiddenChannels:true,shc:{},permissionViewer:true});
 function settings(value={}) {
   const s={...clone(BASE),...value};
   for(const key of ['whitelist','blacklist','notificationBlacklist'])s[key]=Array.isArray(s[key])?s[key].filter(x=>typeof x==='string'):[];
@@ -351,7 +351,7 @@ function createUI(api,getEngine,save,refresh,backup,getStatus){
         if(isArray)change(key,value.split(',').map(x=>x.trim()).filter(x=>/^\d+$/.test(x)));
         else if(typeof BASE[key]==='number'){if(/^\d+$/.test(value))change(key,Number(value));}else change(key,value);},
       style:{color:'white',backgroundColor:'#232428',padding:8,borderRadius:6}}));
-    return h(RN.View,null,button(open?'MLV2 설정 접기':'MLV2 설정 펼치기',()=>setOpen(!open)),open?h(RN.View,null,
+    return h(RN.View,{style:{paddingVertical:12}},button(open?'메시지로거 설정 접기':'메시지로거 설정 펼치기',()=>setOpen(!open)),open?h(RN.View,null,
       ...Object.entries({ignoreMutedGuilds:'음소거 서버 제외',ignoreMutedChannels:'음소거 채널 제외',ignoreBots:'봇 제외',ignoreSelf:'본인 제외',ignoreBlockedUsers:'차단 사용자 제외',ignoreNSFW:'NSFW 제외',ignoreLocalEdits:'내 수정 제외',ignoreLocalDeletes:'내 직접 삭제 제외',
         onlyLogWhitelist:'화이트리스트만 기록',alwaysLogSelected:'현재 채널 우선 기록',alwaysLogDM:'DM 우선 기록',alwaysLogGhostPings:'제외 채널 고스트 핑도 기록',
         showDeletedMessages:'채팅에 삭제 표시',showPurgedMessages:'채팅에 일괄 삭제 표시',showEditedMessages:'채팅에 수정 표시',restoreDeletedMessages:'재시작 후 채팅 복원',showDeletedCount:'삭제 개수 알림',showEditedCount:'수정 개수 알림',
@@ -361,7 +361,7 @@ function createUI(api,getEngine,save,refresh,backup,getStatus){
       ...['whitelist','blacklist','notificationBlacklist'].map(key=>input(key,true)),
       ...['messageCacheCap','savedMessagesCap','maxShownEdits','renderCap','maxFileBytes','maxMediaBytes','contextmenuSubmenuName','deletedMessageColor','editedMessageColor'].map(key=>input(key)),
       ...['toastToggles','toastTogglesDMs'].flatMap(group=>['sent','edited','deleted','ghostPings','disableToastsForLocal'].map(key=>h(RN.View,{key:group+key,style:{flexDirection:'row',paddingVertical:5}},text(group+'.'+key,{flex:1}),h(RN.Switch,{value:!!engine.options[group][key],onValueChange:v=>change(group,{...engine.options[group],[key]:v})})))),
-      button('MLV2 기본값',()=>{engine.options=settings();setDraft({});save();refresh();}),
+      button('MLV2 기본값',()=>{const {showHiddenChannels,shc,permissionViewer}=engine.options;engine.options=settings({showHiddenChannels,shc,permissionViewer});setDraft({});save();refresh();}),
       button('모든 서버 기록 프리셋',()=>{engine.options=settings({...engine.options,onlyLogWhitelist:false,ignoreBots:false,ignoreMutedGuilds:false,ignoreMutedChannels:false});save();refresh();}),
       button('지금 백업',()=>backup().catch(console.error)),text('MLV2 / 호환 백업 JSON 가져오기'),
       h(RN.TextInput,{value:importText,onChangeText:setImport,multiline:true,style:{height:90,padding:8,color:'white',backgroundColor:'#232428'}}),
@@ -514,15 +514,380 @@ async function fetchData(url,limit,signal) {
 module.exports={Journal,MediaCache,allowedUrl,fetchData};
 
 },
+"./shc":function(module,exports,require){
+'use strict';
+// Independently implemented mobile display adapter for JustOptimize/ShowHiddenChannels 6.12.
+// Changes only cloned channel-list models; real VIEW_CHANNEL/CONNECT checks stay intact.
+const TYPES={0:'GUILD_TEXT',2:'GUILD_VOICE',5:'GUILD_ANNOUNCEMENT',6:'GUILD_STORE',13:'GUILD_STAGE_VOICE',15:'GUILD_FORUM',16:'GUILD_MEDIA'};
+const DEFAULTS={hiddenChannelIcon:'lock',sort:'native',showPerms:true,showAdmin:'channel',MarkUnread:false,shouldShowEmptyCategory:false,
+  channels:{GUILD_TEXT:true,GUILD_VOICE:true,GUILD_ANNOUNCEMENT:true,GUILD_STORE:true,GUILD_STAGE_VOICE:true,GUILD_FORUM:true,GUILD_MEDIA:false},blacklistedGuilds:{}};
+function shcSettings(value={}){
+  if(!value||typeof value!=='object'||Array.isArray(value))value={};
+  const out={...DEFAULTS,...value,channels:{...DEFAULTS.channels,...value.channels},blacklistedGuilds:{...value.blacklistedGuilds}};
+  for(const [key,allowed] of Object.entries({sort:['native','bottom','extra'],hiddenChannelIcon:['lock','eye','false'],showAdmin:['channel','include','exclude','false']}))if(!allowed.includes(out[key]))out[key]=DEFAULTS[key];
+  return out;
+}
+function isHidden(api,channel){
+  if(!channel||typeof channel.type!=='number'||[1,3].includes(channel.type)||['browse','customize','guide'].includes(channel.id))return false;
+  const store=api.discord.flux.Stores.PermissionStore,flag=api.discord.permissions?.constants?.VIEW_CHANNEL;
+  if(flag==null||typeof store?.can!=='function')return false;
+  try{return store.can(flag,channel)===false;}catch(_){return false;}
+}
+function displayEnabled(options,channel){const cfg=shcSettings(options.shc);return options.showHiddenChannels&&!options.streamMode&&!cfg.blacklistedGuilds[channel?.guild_id]&&!!cfg.channels[TYPES[channel?.type]];}
+const copy=source=>Object.assign(Object.create(Object.getPrototypeOf(source)),source);
+function hiddenCategoryRecord(api,guildId){
+  const raw={id:guildId+'_hidden',guild_id:guildId,name:'Hidden Channels',type:4,parent_id:null,permission_overwrites:[]};
+  const channels=Object.values(api.discord.flux.Stores.ChannelStore?.getMutableGuildChannelsForGuild?.(guildId)||{});
+  raw.position=Math.max(0,...channels.filter(c=>c.type===4).map(c=>Number(c.position)||0))+1;
+  const create=api.discord.native?.createChannelRecord;
+  if(typeof create==='function')return create(raw);
+  const template=channels.find(c=>c.type===4)||channels[0],record=template?copy(template):{};
+  // Native ChannelRecord has getter-only position/permissionOverwrites. Shadow them on this synthetic copy.
+  for(const [key,value] of Object.entries({...raw,permissionOverwrites:{}}))Object.defineProperty(record,key,{value,writable:true,configurable:true,enumerable:true});
+  return record;
+}
+function decorateGuild(api,result,options){
+  const source=result?.guildChannels||result;if(!source?.categories||!source.noParentCategory)return result;
+  const cfg=shcSettings(options.shc),guildId=source.id||source.noParentCategory.guild?.id;
+  if(!options.showHiddenChannels||options.streamMode||cfg.blacklistedGuilds[guildId])return result;
+  const guild=copy(source),categories=new Map();guild.categories={};
+  function cloneCategory(category){
+    if(!category)return category;if(categories.has(category))return categories.get(category);
+    const out=copy(category);categories.set(category,out);out.guild=guild;out.channels={};out.shownChannelIds=null;
+    for(const [id,row] of Object.entries(category.channels||{})){const cloned=copy(row);cloned.category=out;out.channels[id]=cloned;}
+    if(cfg.shouldShowEmptyCategory&&category.record?.type===4)out.shouldShowEmptyCategory=()=>true;
+    return out;
+  }
+  for(const [id,category] of Object.entries(source.categories))guild.categories[id]=cloneCategory(category);
+  for(const key of ['favoritesCategory','recentsCategory','noParentCategory','voiceChannelsCategory'])guild[key]=cloneCategory(source[key]);
+  const all=[guild.favoritesCategory,guild.recentsCategory,guild.noParentCategory,...Object.values(guild.categories),guild.voiceChannelsCategory].filter(Boolean);
+  const hidden=new Map();
+  for(const category of all)for(const [id,row] of Object.entries(category.channels))if(isHidden(api,row.record)&&displayEnabled(options,row.record)){
+    // Native favorites/recents may also contain the same record. Extra mode deduplicates all of them.
+    row.renderLevel=category.isCollapsed?3:4;row.threadIds=[];row.threadCount=0;row.subtitle=null;
+    if(!hidden.has(id)||category===guild.categories[row.record.parent_id]||category===guild.noParentCategory)hidden.set(id,row);
+  }
+  if(cfg.sort==='extra'&&hidden.size){
+    const template=Object.values(guild.categories)[0]||guild.noParentCategory,category=copy(template),id=guildId+'_hidden';
+    const record=hiddenCategoryRecord(api,guildId);
+    category.id=id;category.record=record;category.guild=guild;category.channels={};category.position=-1;
+    const collapse=api.discord.flux.Stores.CategoryCollapseStore;
+    category.isCollapsed=!!(collapse?.isCollapsed?.(id)||source.collapsedCategoryIds?.[id]);category.isMuted=false;category.shownChannelIds=null;
+    // Reuse only the category prototype's row accessors, never the no-parent special behavior.
+    category.shouldShowEmptyCategory=()=>true;
+    for(const parent of all)for(const id of hidden.keys())delete parent.channels[id];
+    for(const [id,row] of hidden){row.category=category;row.renderLevel=category.isCollapsed?3:4;category.channels[id]=row;}
+    guild.categories[category.id]=category;all.push(category);
+    if(typeof guild.voiceChannelsSectionNumber==='number')guild.voiceChannelsSectionNumber++;
+    const originalGetCategory=guild.getCategory;
+    if(typeof originalGetCategory==='function')guild.getCategory=function(record){return hidden.has(record?.id)?category:originalGetCategory.call(this,record);};
+  }
+  if(cfg.sort==='bottom'||cfg.sort==='extra')for(const category of all){
+    // Only override the ordered ID cache on cloned category objects.
+    category.getShownChannelIds=function(){return Object.values(this.channels).filter(r=>r.renderLevel===4).sort((a,b)=>{
+      const weight=r=>(Number(r.record.position)||0)+([2,13].includes(r.record.type)?1000:0)+(isHidden(api,r.record)?10000:0);
+      return weight(a)-weight(b)||String(a.id).localeCompare(String(b.id));
+    }).map(r=>r.id);};
+  }
+  guild.rows=null;guild.sections=null;guild.sortedNamedCategories=null;guild.allChannelsById=null;guild.firstVoiceChannel=undefined;
+  // Avoid a fresh identity on every Flux read: the caller caches by source identity/version/options.
+  guild.version=(Number(source.version)||0)+1;
+  return result?.guildChannels?{...result,guildChannels:guild,guildChannelsVersion:guild.version}:guild;
+}
+function createNativeSHC(api,getOptions,subscribe,renderHidden,onStatus){
+  const stores=api.discord.flux.Stores,undo=[],cache=new WeakMap();let active=true;
+  function options(){return getOptions()||{};}
+  const shown=c=>active&&isHidden(api,c)&&displayEnabled(options(),c);
+  function refresh(){cacheClear++;if(active)connectStores();try{stores.ChannelListStore?.emitChange?.();}catch(_){}}
+  let cacheClear=0;
+  if(typeof stores.ChannelStore?.getChannel==='function')undo.push(api.patcher.instead(stores.ChannelStore,'getChannel',function(args,original){
+    const id=args[0],cfg=shcSettings(options().shc),guildId=typeof id==='string'&&id.endsWith('_hidden')?id.slice(0,-7):null;
+    if(active&&guildId&&options().showHiddenChannels&&!options().streamMode&&cfg.sort==='extra'&&!cfg.blacklistedGuilds[guildId])return hiddenCategoryRecord(api,guildId);
+    return original.apply(this,args);
+  }));
+  let listConnected=false;const patched=new WeakMap();
+  function patchOnce(parent,key,callback){if(!parent||typeof parent[key]!=='function')return false;
+    let keys=patched.get(parent);if(!keys)patched.set(parent,keys=new Set());if(!keys.has(key)){keys.add(key);undo.push(api.patcher.instead(parent,key,callback));}return true;
+  }
+  function connectStores(){
+  for(const key of ['getGuild','getGuildWithoutChangingGuildActionRows'])if(patchOnce(stores.ChannelListStore,key,function(args,original){
+      const out=original.apply(this,args),source=out?.guildChannels||out;if(!source||typeof source!=='object')return out;
+      const signature=JSON.stringify([options().showHiddenChannels,options().streamMode,options().shc,source.version,cacheClear]);
+      const last=cache.get(source);if(last?.signature===signature)return out?.guildChannels?{...out,guildChannels:last.guild,guildChannelsVersion:last.guild.version}:last.guild;
+      const result=decorateGuild(api,out,options());cache.set(source,{signature,guild:result?.guildChannels||result});return result;
+    }))listConnected=true;
+  const read=stores.ReadStateStore;
+  for(const key of ['getGuildChannelUnreadState','getMentionCount','getUnreadCount','hasTrackedUnread','hasUnread','hasUnreadPins'])patchOnce(read,key,function(args,original){
+    const channel=stores.ChannelStore?.getChannel?.(typeof args[0]==='object'?args[0].id:args[0]);
+    if(shown(channel)&&!shcSettings(options().shc).MarkUnread)return key==='getGuildChannelUnreadState'?{mentionCount:0,unread:false}:key.startsWith('get')?0:false;
+    return original.apply(this,args);
+  });
+  }
+  connectStores();
+  const find=api.modules?.finders;
+  if(find?.waitForModules)undo.push(find.waitForModules(find.filters.withProps('fetchMessages','deleteMessage'),actions=>{
+    if(!active)return;undo.push(api.patcher.instead(actions,'fetchMessages',function(args,original){
+      const id=args[0]?.channelId||args[0]?.channel_id||args[0],channel=stores.ChannelStore?.getChannel?.(id);
+      if(active&&options().showHiddenChannels&&isHidden(api,channel))return Promise.resolve();return original.apply(this,args);
+    }));
+  }));
+  const wait=api.discord.native?.waitForHiddenChannelRenderer;
+  if(typeof wait==='function')undo.push(wait((parent,key,rowHeight)=>{
+    connectStores();
+    const channelAt=props=>{try{return props?.guildChannels?.getChannelFromSectionRow?.(props.section,props.row)?.channel?.record;}catch(_){}};
+    const cleanup=[api.patcher.instead(parent,key,function(args,original){
+      const channel=channelAt(args[0]);if(shown(channel))return renderHidden(channel);return original.apply(this,args);
+    })];
+    if(typeof rowHeight==='function'&&typeof parent.getChannelListItemSize==='function')cleanup.push(api.patcher.instead(parent,'getChannelListItemSize',function(args,original){
+      if(shown(channelAt(args[0])))return rowHeight(args[0].fontScale);return original.apply(this,args);
+    }));
+    return()=>{for(const fn of cleanup.reverse())fn();};
+  },message=>{onStatus((listConnected?'ChannelListStore connected · ':'ChannelListStore 없음 · ')+message);}));
+  else onStatus('채널 렌더러 없음 · 설정 목록 사용 가능');
+  undo.push(subscribe(refresh));refresh();
+  return()=>{active=false;for(const fn of undo.reverse())fn?.();refresh();};
+}
+module.exports={TYPES,DEFAULTS,shcSettings,isHidden,displayEnabled,hiddenCategoryRecord,decorateGuild,createNativeSHC};
+
+},
+"./channels":function(module,exports,require){
+'use strict';
+// Read-only channel metadata. PermissionStore.can is never patched.
+const {TYPES,shcSettings,isHidden,displayEnabled,createNativeSHC}=require('./shc');
+const PERMISSIONS=[
+  ['CREATE_INSTANT_INVITE',0,'초대 만들기'],['KICK_MEMBERS',1,'멤버 추방'],['BAN_MEMBERS',2,'멤버 차단'],['ADMINISTRATOR',3,'관리자'],
+  ['MANAGE_CHANNELS',4,'채널 관리'],['MANAGE_GUILD',5,'서버 관리'],['ADD_REACTIONS',6,'반응 추가'],['VIEW_AUDIT_LOG',7,'감사 로그 보기'],
+  ['PRIORITY_SPEAKER',8,'우선 발언'],['STREAM',9,'방송'],['VIEW_CHANNEL',10,'채널 보기'],['SEND_MESSAGES',11,'메시지 보내기'],
+  ['SEND_TTS_MESSAGES',12,'TTS 메시지'],['MANAGE_MESSAGES',13,'메시지 관리'],['EMBED_LINKS',14,'링크 임베드'],['ATTACH_FILES',15,'파일 첨부'],
+  ['READ_MESSAGE_HISTORY',16,'메시지 기록 보기'],['MENTION_EVERYONE',17,'전체 멘션'],['USE_EXTERNAL_EMOJIS',18,'외부 이모지'],['VIEW_GUILD_INSIGHTS',19,'서버 인사이트'],
+  ['CONNECT',20,'음성 연결'],['SPEAK',21,'말하기'],['MUTE_MEMBERS',22,'멤버 음소거'],['DEAFEN_MEMBERS',23,'멤버 헤드셋 음소거'],
+  ['MOVE_MEMBERS',24,'멤버 이동'],['USE_VAD',25,'음성 감지'],['CHANGE_NICKNAME',26,'별명 변경'],['MANAGE_NICKNAMES',27,'별명 관리'],
+  ['MANAGE_ROLES',28,'역할 관리'],['MANAGE_WEBHOOKS',29,'웹후크 관리'],['MANAGE_GUILD_EXPRESSIONS',30,'서버 표현 관리'],['USE_APPLICATION_COMMANDS',31,'앱 명령 사용'],
+  ['REQUEST_TO_SPEAK',32,'발언 요청'],['MANAGE_EVENTS',33,'이벤트 관리'],['MANAGE_THREADS',34,'스레드 관리'],['CREATE_PUBLIC_THREADS',35,'공개 스레드 생성'],
+  ['CREATE_PRIVATE_THREADS',36,'비공개 스레드 생성'],['USE_EXTERNAL_STICKERS',37,'외부 스티커'],['SEND_MESSAGES_IN_THREADS',38,'스레드 메시지'],['USE_EMBEDDED_ACTIVITIES',39,'활동 사용'],
+  ['MODERATE_MEMBERS',40,'멤버 타임아웃'],['VIEW_CREATOR_MONETIZATION_ANALYTICS',41,'수익 분석 보기'],['USE_SOUNDBOARD',42,'사운드보드'],['CREATE_GUILD_EXPRESSIONS',43,'서버 표현 생성'],
+  ['CREATE_EVENTS',44,'이벤트 생성'],['USE_EXTERNAL_SOUNDS',45,'외부 사운드'],['SEND_VOICE_MESSAGES',46,'음성 메시지'],['SET_VOICE_CHANNEL_STATUS',48,'음성 채널 상태'],
+  ['SEND_POLLS',49,'투표 보내기'],['USE_EXTERNAL_APPS',50,'외부 앱 사용'],['PIN_MESSAGES',51,'메시지 고정'],['BYPASS_SLOWMODE',52,'슬로 모드 우회']
+];
+function values(value){return value instanceof Map?[...value.values()]:Array.isArray(value)?value:Object.values(value||{});}
+// Discord also uses HighLow wrappers on Hermes versions without BigInt.
+// Decimal long division avoids both 32-bit truncation and Number rounding.
+function flagBits(value){
+  if(typeof value==='number'&&!Number.isSafeInteger(value))return null;
+  let decimal;try{decimal=value==null?null:String(value);}catch(_){return null;}
+  if(!decimal||!/^\d+$/.test(decimal))return null;
+  decimal=decimal.replace(/^0+/,'')||'0';if(decimal.length>40)return null;
+  const bits=new Set();let bit=0;
+  while(decimal!=='0'){
+    let carry=0,next='';for(const digit of decimal){const n=carry*10+Number(digit);next+=Math.floor(n/2);carry=n%2;}
+    if(carry)bits.add(bit);decimal=next.replace(/^0+/,'')||'0';bit++;
+  }return bits;
+}
+function channelAccess(api,channel){
+  if(!channel)return null;if(channel.type===1||channel.type===3)return true;
+  const permission=api.discord.permissions?.constants?.VIEW_CHANNEL;
+  const store=api.discord.flux.Stores.PermissionStore;
+  if(permission==null||typeof store?.can!=='function')return null;
+  try{const allowed=store.can(permission,channel);return typeof allowed==='boolean'?allowed:null;}catch(_){return null;}
+}
+function guildChannels(api,guildId){
+  if(!guildId)return [];
+  const store=api.discord.flux.Stores.ChannelStore;let channels;
+  try{
+    if(typeof store?.getMutableGuildChannelsForGuild==='function')channels=values(store.getMutableGuildChannelsForGuild(guildId));
+    else if(typeof store?.getChannelIds==='function')channels=store.getChannelIds(guildId).map(id=>store.getChannel(id));
+    else return [];
+  }catch(_){return [];}
+  const seen=new Set();return channels.filter(c=>c?.id&&c.guild_id===guildId&&!seen.has(c.id)&&seen.add(c.id))
+    .sort((a,b)=>(a.position||0)-(b.position||0)||String(a.id).localeCompare(String(b.id)));
+}
+function hiddenChannels(api,guildId){return guildChannels(api,guildId).filter(c=>c.type!==4&&isHidden(api,c));}
+function permissionRows(api,channel){
+  const store=api.discord.flux.Stores.PermissionStore,constants=api.discord.permissions?.constants||{};
+  return PERMISSIONS.map(([name,bit,label])=>{
+    let allowed=null;const flag=constants[name];
+    if(flag!=null&&typeof store?.can==='function')try{const result=store.can(flag,channel);if(typeof result==='boolean')allowed=result;}catch(_){}
+    return {name,bit,label,allowed};
+  });
+}
+function overwrites(channel){return values(channel?.permissionOverwrites??channel?.permission_overwrites).filter(o=>o&&o.id);}
+function rolesForGuild(api,guildId){
+  const stores=api.discord.flux.Stores;try{
+    const store=stores.GuildRoleStore;
+    const roles=typeof store?.getUnsafeMutableRoles==='function'?store.getUnsafeMutableRoles(guildId):typeof store?.getRolesSnapshot==='function'?store.getRolesSnapshot(guildId):stores.GuildStore?.getGuild?.(guildId)?.roles;
+    return values(roles).filter(r=>r?.id).sort((a,b)=>(b.position||0)-(a.position||0));
+  }catch(_){return [];}
+}
+function memberViewAccess(api,channel,userId){
+  const stores=api.discord.flux.Stores,guild=stores.GuildStore?.getGuild?.(channel.guild_id);
+  const member=stores.GuildMemberStore?.getMember?.(channel.guild_id,userId),roles=rolesForGuild(api,channel.guild_id);
+  if(guild?.ownerId===userId||guild?.owner_id===userId)return true;
+  if(!member||!Array.isArray(member.roles))return null;
+  const ids=new Set([channel.guild_id,...member.roles]),own=roles.filter(r=>ids.has(r.id));
+  if(own.length!==ids.size)return null;let allowed=false;
+  for(const r of own){const bits=flagBits(r.permissions);if(!bits)return null;if(bits.has(3))return true;if(bits.has(10))allowed=true;}
+  const list=overwrites(channel),apply=items=>{let deny=false,allow=false;for(const o of items){const a=flagBits(o.allow),d=flagBits(o.deny);if(!a||!d)return false;deny=deny||d.has(10);allow=allow||a.has(10);}if(deny)allowed=false;if(allow)allowed=true;return true;};
+  if(!apply(list.filter(o=>o.id===channel.guild_id)))return null;
+  if(!apply(list.filter(o=>String(o.type)==='0'&&o.id!==channel.guild_id&&ids.has(o.id))))return null;
+  if(!apply(list.filter(o=>String(o.type)==='1'&&o.id===userId)))return null;
+  return allowed;
+}
+function accessLists(api,channel,cfg){
+  const roles=rolesForGuild(api,channel.guild_id),list=overwrites(channel);
+  const channelRoles=roles.filter(r=>list.some(o=>(String(o.type)==='0'||o.type==='role')&&o.id===r.id&&
+    ((cfg.showAdmin!=='false'&&flagBits(r.permissions)?.has(3))||flagBits(o.allow)?.has(10)||(flagBits(r.permissions)?.has(10)&&!flagBits(o.deny)?.has(10)))));
+  const adminRoles=roles.filter(r=>flagBits(r.permissions)?.has(3)&&(cfg.showAdmin==='include'||cfg.showAdmin==='exclude'&&!r.tags?.bot_id));
+  const members=list.filter(o=>String(o.type)==='1').map(o=>({id:o.id,user:api.discord.flux.Stores.UserStore?.getUser?.(o.id),allowed:memberViewAccess(api,channel,o.id)}));
+  return {channelRoles,adminRoles,members};
+}
+function snowflakeDate(id){
+  if(!/^\d{16,22}$/.test(String(id||'')))return null;let carry=0,quotient='';
+  for(const digit of String(id)){const n=carry*10+Number(digit);quotient+=Math.floor(n/4194304);carry=n%4194304;}
+  const date=new Date(Number(quotient)+1420070400000);return Number.isFinite(date.getTime())?date.toLocaleString():null;
+}
+function metadataLines(channel){
+  const lines=[],slow=channel.rateLimitPerUser??channel.rate_limit_per_user,emoji=channel.iconEmoji??channel.icon_emoji;
+  if(emoji)lines.push('아이콘: '+(emoji.name||emoji.id));
+  if(slow>0)lines.push('슬로 모드: '+[Math.floor(slow/3600),Math.floor(slow/60)%60,slow%60].map(v=>String(v).padStart(2,'0')).join(':'));
+  if(channel.nsfw)lines.push('연령 제한 채널 (NSFW)');
+  if(channel.isSpoilerChannel?.())lines.push('스포일러 채널');
+  if(channel.bitrate&&channel.type===2)lines.push('비트레이트: '+channel.bitrate/1000+' kbps');
+  const created=snowflakeDate(channel.id),last=snowflakeDate(channel.lastMessageId??channel.last_message_id);
+  if(created)lines.push('생성 시각: '+created);if(last)lines.push('최근 메시지 시각: '+last);
+  if(channel.type===15){const tags=values(channel.availableTags??channel.available_tags);lines.push('포럼 태그: '+(tags.map(t=>t.name).filter(Boolean).join(' · ')||'없음'));if(channel.topic)lines.push('포럼 가이드라인: '+channel.topic);}
+  return lines;
+}
+function createChannelTools(api,getEngine,save,subscribe,status){
+  const React=api.react.React,RN=api.react.ReactNative,h=React.createElement,stores=api.discord.flux.Stores;
+  const text=(s,style={})=>h(RN.Text,{style:{color:'#f2f3f5',...style}},s);
+  const button=(s,fn)=>h(RN.Pressable,{key:s,onPress:fn,style:{padding:10,backgroundColor:'#404249',borderRadius:7,margin:3}},text(s));
+  const options=()=>getEngine()?.options||{};
+  const config=()=>shcSettings(options().shc);
+  const change=(key,value)=>{const engine=getEngine();if(engine){engine.options.shc={...config(),[key]:value};save();}};
+  function useUpdates(){const [,update]=React.useState(0);React.useEffect(()=>{
+    const cb=()=>update(n=>n+1),cleanup=[subscribe(cb)];
+    for(const name of ['ChannelStore','GuildStore','GuildRoleStore','GuildMemberStore','PermissionStore','SelectedGuildStore']){
+      const store=stores[name];if(typeof store?.addChangeListener==='function'&&typeof store?.removeChangeListener==='function'){
+        store.addChangeListener(cb);cleanup.push(()=>store.removeChangeListener(cb));
+      }
+    }return()=>{for(const undo of cleanup)undo?.();};
+  },[]);}
+  const toggle=(label,key)=>h(RN.View,{key,style:{flexDirection:'row',alignItems:'center',paddingVertical:6}},text(label,{flex:1}),h(RN.Switch,{value:!!options()[key],onValueChange:value=>{const engine=getEngine();if(engine){engine.options[key]=value;save();}}}));
+  const shcToggle=(label,key,value=config()[key],write=value=>change(key,value))=>h(RN.View,{key:label,style:{flexDirection:'row',alignItems:'center',paddingVertical:6}},text(label,{flex:1}),h(RN.Switch,{value:!!value,onValueChange:write}));
+  const choices=(label,key,items)=>h(RN.View,{key},text(label,{color:'#b5bac1',marginTop:12}),h(RN.View,{style:{flexDirection:'row',flexWrap:'wrap'}},...items.map(([value,name])=>button((config()[key]===value?'✓ ':'')+name,()=>change(key,value)))));
+  const section=(title,open,setOpen,children)=>h(RN.View,{style:{borderTopWidth:1,borderTopColor:'#4e5058',paddingVertical:12}},button(title+(open?' 접기':' 펼치기'),()=>setOpen(!open)),open?children:null);
+  function selectedGuild(){return stores.SelectedGuildStore?.getGuildId?.()||stores.ChannelStore?.getChannel?.(stores.SelectedChannelStore?.getChannelId?.())?.guild_id;}
+  function HiddenSettings(){useUpdates();const [open,setOpen]=React.useState(false),[browse,setBrowse]=React.useState(false),[guildSettings,setGuildSettings]=React.useState(false);
+    return section('ShowHiddenChannels 설정',open,setOpen,h(RN.View,null,
+      toggle('숨겨진 채널 표시','showHiddenChannels'),
+      choices('숨김 표시 아이콘','hiddenChannelIcon',[['lock','잠금'],['eye','눈'],['false','없음']]),
+      choices('채널 정렬','sort',[['native','원래 위치'],['bottom','카테고리 아래'],['extra','별도 Hidden Channels 카테고리']]),
+      shcToggle('숨김 채널의 접근 권한 표시','showPerms'),
+      choices('관리자 역할 표시','showAdmin',[['channel','채널별 역할만'],['include','모든 관리자'],['exclude','봇 관리자 제외'],['false','관리자 숨김']]),
+      shcToggle('숨김 채널의 읽지 않음 표시','MarkUnread'),shcToggle('빈 카테고리 표시','shouldShowEmptyCategory'),
+      text('표시할 채널 종류',{marginTop:12,color:'#b5bac1'}),
+      ...Object.entries(TYPES).map(([type,name])=>shcToggle(({0:'텍스트',2:'음성',5:'공지',6:'스토어',13:'스테이지',15:'포럼',16:'미디어'})[type],name,config().channels[name],value=>change('channels',{...config().channels,[name]:value}))),
+      button('서버별 ShowHiddenChannels 켜기 / 끄기',()=>setGuildSettings(true)),
+      button('ShowHiddenChannels 기본값',()=>{const engine=getEngine();if(engine){engine.options.shc={};save();}}),
+      text(status().hiddenChannelList||'채널 목록 연결 확인 중',{fontSize:11,color:'#949ba4'}),
+      button('숨겨진 채널 목록 열기',()=>setBrowse(true)),
+      browse?h(Browser,{hiddenOnly:true,onClose:()=>setBrowse(false)}):null,
+      guildSettings?h(GuildSettings,{onClose:()=>setGuildSettings(false)}):null));
+  }
+  function GuildSettings({onClose}){useUpdates();const guilds=values(stores.GuildStore?.getGuilds?.()).filter(g=>g?.id);
+    return h(RN.Modal,{visible:true,onRequestClose:onClose},h(RN.View,{style:{flex:1,backgroundColor:'#313338',padding:16}},button('닫기',onClose),text('서버별 ShowHiddenChannels',{fontSize:20}),
+      h(RN.FlatList,{data:guilds,keyExtractor:g=>g.id,renderItem:({item})=>shcToggle(item.name||item.id,item.id,!config().blacklistedGuilds[item.id],value=>change('blacklistedGuilds',{...config().blacklistedGuilds,[item.id]:!value}))})));
+  }
+  function OtherSettings({children}){useUpdates();const [open,setOpen]=React.useState(false),[browse,setBrowse]=React.useState(false);
+    return section('기타 기능 설정',open,setOpen,h(RN.View,null,toggle('권한 뷰어','permissionViewer'),
+      options().permissionViewer?button('권한 뷰어 열기',()=>setBrowse(true)):null,
+      browse?h(Browser,{hiddenOnly:false,onClose:()=>setBrowse(false)}):null,children));
+  }
+  function Browser({hiddenOnly,onClose,initialGuildId}){useUpdates();
+    const [guildId,setGuild]=React.useState(initialGuildId||selectedGuild()),[query,setQuery]=React.useState(''),[serverPicker,setServerPicker]=React.useState(false),[channelId,setChannel]=React.useState('');
+    let guilds=[];try{guilds=values(stores.GuildStore?.getGuilds?.()).filter(g=>g?.id);}catch(_){}
+    const guild=stores.GuildStore?.getGuild?.(guildId);
+    const needle=query.toLowerCase(),channels=(hiddenOnly?hiddenChannels(api,guildId).filter(c=>displayEnabled(options(),c)):guildChannels(api,guildId)).filter(c=>[c.name,c.id].some(v=>String(v||'').toLowerCase().includes(needle)));
+    const serverRows=guilds.filter(g=>[g.name,g.id].some(v=>String(v||'').toLowerCase().includes(needle)));
+    const enabled=!options().streamMode&&(!hiddenOnly||options().showHiddenChannels);
+    return h(RN.Modal,{visible:true,onRequestClose:onClose},h(RN.View,{style:{flex:1,backgroundColor:'#313338',padding:16}},
+      button('닫기',onClose),text(hiddenOnly?'숨겨진 채널':'권한 뷰어',{fontSize:22,fontWeight:'bold'}),
+      button((guild?.name||'서버 선택')+' ▾',()=>{setServerPicker(!serverPicker);setQuery('');setChannel('');}),
+      h(RN.TextInput,{value:query,onChangeText:setQuery,placeholder:serverPicker?'서버명 / ID 검색':'채널명 / ID 검색',placeholderTextColor:'#949ba4',style:{color:'white',backgroundColor:'#232428',padding:10,marginVertical:8}}),
+      !enabled?text(options().streamMode?'스트리머 모드에서 채널 목록을 숨겼습니다.':'ShowHiddenChannels를 켜면 목록이 표시됩니다.'):null,
+      h(RN.FlatList,{data:serverPicker?serverRows:enabled?channels:[],keyExtractor:c=>c.id,initialNumToRender:12,windowSize:5,
+        ListEmptyComponent:text(serverPicker?'서버 정보 없음':!guildId?'서버를 선택하세요.':hiddenOnly?'확인 가능한 숨겨진 채널이 없습니다.':'받은 채널 정보가 없습니다.',{color:'#949ba4'}),
+        renderItem:({item})=>h(RN.Pressable,{onPress:()=>{if(serverPicker){setGuild(item.id);setServerPicker(false);setQuery('');}else setChannel(item.id);},style:{padding:12,marginVertical:4,backgroundColor:'#2b2d31',borderRadius:8}},
+          text(serverPicker?item.name||item.id:(channelAccess(api,item)===false?'🔒 ':'')+(item.type===4?'카테고리 · ':'#')+(item.name||'이름 정보 없음')),
+          text(item.id,{fontSize:11,color:'#949ba4'}))}),
+      channelId?h(Detail,{channelId,onClose:()=>setChannel('')}):null));
+  }
+  function Detail({channelId,onClose}){useUpdates();const [roleId,setRole]=React.useState('');
+    const channel=stores.ChannelStore?.getChannel?.(channelId);
+    if(!channel)return h(RN.Modal,{visible:true,onRequestClose:onClose},h(RN.View,{style:{padding:20,backgroundColor:'#313338',flex:1}},button('닫기',onClose),text('채널 정보가 더 이상 없습니다.')));
+    const guild=stores.GuildStore?.getGuild?.(channel.guild_id),parent=stores.ChannelStore?.getChannel?.(channel.parent_id??channel.parentId),access=channelAccess(api,channel);
+    const roles=rolesForGuild(api,channel.guild_id),role=roles.find(r=>r.id===roleId),roleBits=role?flagBits(role.permissions):null;
+    const rows=permissionRows(api,channel),allOverwrites=overwrites(channel);
+    const accessList=accessLists(api,channel,config());
+    const badge=value=>value===true?'허용':value===false?'거부':'확인 불가';
+    const color=value=>value===true?'#57f287':value===false?'#ed4245':'#949ba4';
+    return h(RN.Modal,{visible:true,onRequestClose:onClose},h(RN.ScrollView,{contentContainerStyle:{padding:20,backgroundColor:'#313338',flexGrow:1}},
+      button('닫기',onClose),text((access===false?'🔒 ':'')+'#'+(channel.name||'이름 정보 없음'),{fontSize:22,fontWeight:'bold'}),
+      text(guild?.name||channel.guild_id||'서버 정보 없음',{color:'#b5bac1',marginTop:8}),
+      text('채널 ID: '+channel.id+'\n카테고리: '+(parent?.name||parent?.id||'없음')+'\n유형: '+channel.type,{color:'#949ba4',marginTop:8,selectable:true}),
+      text('주제: '+(channel.topic||'정보 없음'),{marginTop:10,selectable:true}),
+      ...metadataLines(channel).map(line=>text(line,{marginTop:8,color:'#b5bac1'})),
+      text('채널 보기: '+badge(access),{color:color(access),marginVertical:12}),
+      access===false?text('이 채널의 메시지는 볼 수 없습니다.',{color:'#949ba4'}):null,
+      access===false&&config().showPerms?h(RN.View,null,
+        text('이 채널을 볼 수 있는 멤버',{fontSize:18,fontWeight:'bold',marginTop:16}),
+        text(accessList.members.filter(m=>m.allowed===true).map(m=>m.user?.global_name||m.user?.username||m.id).join(' · ')||'확인된 개별 멤버 없음',{marginTop:8}),
+        accessList.members.some(m=>m.allowed===null)?text('일부 멤버의 역할 정보가 없어 접근 여부를 확인할 수 없습니다.',{fontSize:12,color:'#949ba4'}):null,
+        text('채널별 접근 역할',{fontSize:18,fontWeight:'bold',marginTop:16}),text(accessList.channelRoles.map(r=>r.name||r.id).join(' · ')||'없음',{marginTop:8}),
+        ['include','exclude'].includes(config().showAdmin)?h(RN.View,null,text('관리자 역할',{fontSize:18,fontWeight:'bold',marginTop:16}),text(accessList.adminRoles.map(r=>r.name||r.id).join(' · ')||'없음',{marginTop:8})):null):null,
+      options().permissionViewer?h(RN.View,null,
+        text('내 실제 채널 권한',{fontSize:18,fontWeight:'bold',marginTop:16}),
+        ...rows.map(row=>h(RN.View,{key:row.name,style:{flexDirection:'row',paddingVertical:5}},text(row.label,{flex:1}),text(badge(row.allowed),{color:color(row.allowed)}))),
+        text('서버 역할 권한',{fontSize:18,fontWeight:'bold',marginTop:20}),
+        text('역할 자체의 권한입니다. 내 역할의 합산 권한은 위에 표시됩니다.',{fontSize:12,color:'#949ba4',marginVertical:6}),
+        h(RN.ScrollView,{horizontal:true},...roles.map(r=>button(r.name||r.id,()=>setRole(r.id)))),
+        role?text((role.name||role.id)+'\n'+(roleBits?PERMISSIONS.filter(([,bit])=>roleBits.has(bit)).map(([, ,label])=>label).join(' · ')||'허용 권한 없음':'권한 데이터 확인 불가'),{marginVertical:8}):null,
+        text('채널별 권한 덮어쓰기',{fontSize:18,fontWeight:'bold',marginTop:20}),
+        !allOverwrites.length?text('채널별 덮어쓰기 없음',{color:'#949ba4',marginTop:8}):null,
+        ...allOverwrites.map(o=>{
+          const isMember=o.type===1||o.type==='1'||o.type==='member',target=isMember?stores.UserStore?.getUser?.(o.id):roles.find(r=>r.id===o.id);
+          const allow=flagBits(o.allow),deny=flagBits(o.deny);
+          return h(RN.View,{key:o.id,style:{backgroundColor:'#2b2d31',padding:12,borderRadius:8,marginVertical:6}},
+            text((isMember?'멤버 · ':'역할 · ')+(target?.name||target?.global_name||target?.username||o.id),{fontWeight:'bold'}),
+            text('ID: '+o.id,{color:'#949ba4',fontSize:11}),
+            allow&&deny?text(PERMISSIONS.filter(([,bit])=>allow.has(bit)||deny.has(bit)).map(([,bit,label])=>label+': '+(allow.has(bit)?'허용':'거부')).join('\n')||'모두 기본값 (중립)',{marginTop:8}):text('권한 데이터 확인 불가',{color:'#949ba4'}));
+        })):null));
+  }
+  function HiddenRow({channelId}){useUpdates();const [open,setOpen]=React.useState(false),channel=stores.ChannelStore?.getChannel?.(channelId);
+    if(!getEngine()||!isHidden(api,channel)||!displayEnabled(options(),channel))return null;
+    const icon=config().hiddenChannelIcon==='eye'?'👁':config().hiddenChannelIcon==='false'?'':'🔒';
+    const typeIcon=({0:'#',2:'🔊',5:'📢',6:'▣',13:'◉',15:'▤',16:'▧'})[channel.type]||'#';
+    return h(RN.View,null,h(RN.Pressable,{onPress:()=>setOpen(true),onLongPress:()=>setOpen(true),accessibilityLabel:'숨겨진 채널 '+(channel.name||channel.id),style:{minHeight:44,paddingHorizontal:20,paddingVertical:10,flexDirection:'row',alignItems:'center'}},
+      text(typeIcon,{color:'#949ba4',fontSize:18,marginRight:8}),text(channel.name||'이름 정보 없음',{color:'#949ba4',fontSize:16,flex:1}),text(icon,{fontSize:15,color:'#949ba4'})),
+      open?h(Detail,{channelId,onClose:()=>setOpen(false)}):null);
+  }
+  function connect(){return createNativeSHC(api,()=>options(),subscribe,channel=>h(HiddenRow,{channelId:channel.id}),message=>{status().hiddenChannelList=message;});
+  }
+  return {HiddenSettings,OtherSettings,Browser,Detail,HiddenRow,GuildSettings,connect};
+}
+module.exports={createChannelTools,flagBits,channelAccess,guildChannels,hiddenChannels,permissionRows,overwrites,rolesForGuild,memberViewAccess,accessLists,metadataLines,snowflakeDate,PERMISSIONS};
+
+},
 "./plugin":function(module,exports,require){
 'use strict';
 const {clone}=require('./core');
 const {normalizeMessage,validEditTime,editTime,verifiedEdits,isLocalTemporary}=require('./mobile');
 const {Engine}=require('./engine');
 const {createUI,sortArchiveRows}=require('./ui');
+const {createChannelTools}=require('./channels');
 const {Journal,MediaCache,fetchData}=require('./io');
 function createPlugin(api,definePlugin) {
-  let React,RN,stores,archive,journal,media,timer,base,UI,maintenanceTimer,backupTimer,selfTestTimer,fetchActions,started=false,dirty=false;
+  let React,RN,stores,archive,journal,media,timer,base,UI,channelTools,maintenanceTimer,backupTimer,selfTestTimer,fetchActions,started=false,dirty=false;
   let diagnostics={nativeTextShape:'아직 수집되지 않음'},lastTest=0,stopping=false;const fetchTimes=new Map(),nativeSeen=new Map(),nativeRenderedSeen=new Map(),nativeRecordBefore=new Map(),temporaryIds=new Set(),temporaryRecords=new Map(),nativeContentSeen=new Map(),nativePainted=new Map();
   let status='시작 대기',inlineReady=false,unpatches=[],listeners=new Set();
   const notify=()=>{for(const cb of listeners)cb();};
@@ -980,13 +1345,16 @@ function createPlugin(api,definePlugin) {
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
     const logs=sortArchiveRows((archive?.logs(query,kind)||[]).filter(r=>!r.localTemporary&&!isLocalTemporary(r.message)&&(kind==='sent'||r.deletedAt||verifiedEdits(archive,r.message.id).length)),archive?.options.oldestActivityFirst===true);
     const proofStats=archive?{verified:[...archive.records.values()].filter(r=>Number.isInteger(r.verifiedHistoryStart)&&r.editEvidenceSource).length,visible:[...archive.records.keys()].filter(id=>verifiedEdits(archive,id).length).length}:undefined;
-    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.16',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.5.0',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
     const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
-    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.16'),{fontSize:22,fontWeight:'bold'}),
+    const header=h(View,null,text('Revenge All-in-One v'+(api.pluginVersion||'0.5.0'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
-      text('실제 화면 호출: updateRows '+(diagnostics.nativeBridgeMessageRows||0)+' · RowManager '+(diagnostics.nativeRowsGenerated||0)+' · 레코드 갱신 '+(diagnostics.nativeRecordUpdatesSeen||0),{color:'#949ba4',fontSize:12}),
-      h(View,{style:{flexDirection:'row'}},button('연결 진단 보기',()=>setDiagnosticOpen(true)),button('진단 복사',copyDiagnostic)),
       UI?h(UI.Options):null,
+      channelTools?h(channelTools.HiddenSettings):null,
+      channelTools?h(channelTools.OtherSettings,null,
+        text('실제 화면 호출: updateRows '+(diagnostics.nativeBridgeMessageRows||0)+' · RowManager '+(diagnostics.nativeRowsGenerated||0)+' · 레코드 갱신 '+(diagnostics.nativeRecordUpdatesSeen||0),{color:'#949ba4',fontSize:12}),
+        h(View,{style:{flexDirection:'row'}},button('연결 진단 보기',()=>setDiagnosticOpen(true)),button('진단 복사',copyDiagnostic))):null,
+      text('메시지 기록',{fontSize:18,fontWeight:'bold',marginTop:18}),
       h(TextInput,{value:query,onChangeText:v=>{setQuery(v);setLimit(archive?.options.renderCap||50);},placeholder:'내용 / 작성자 / 채널 ID 검색',placeholderTextColor:'#949ba4',
         style:{color:'white',backgroundColor:'#232428',padding:10,borderRadius:6,marginVertical:12}}),
       h(View,{style:{flexDirection:'row',flexWrap:'wrap'}},...Object.entries({all:'전체',deleted:'삭제',edited:'수정',purged:'일괄 삭제',ghostpings:'고스트 핑',sent:'최근 메시지'}).map(([k,label])=>
@@ -1037,6 +1405,7 @@ function createPlugin(api,definePlugin) {
       for(const r of [...archive.records.values()])if(r.localTemporary||isLocalTemporary(r.message)){temporaryRecords.set(r.message.id,{...clone(r),localTemporary:true});archive.records.delete(r.message.id);save();}
       archive.context.getMessage=(channel,id)=>previous(id,channel);
       UI=createUI(api,()=>archive,save,refreshChat,backup,()=>({...diagnostics,stats:archive.stats()}));
+      channelTools=createChannelTools(api,()=>started?archive:null,save,cb=>{listeners.add(cb);return()=>listeners.delete(cb);},()=>diagnostics);
       const nativeFile=api.discord.native?.FileModule;
       const binaryPath=(id,name)=>'message-logger/'+userId+'/'+id+'-'+String(name).replace(/[^a-zA-Z0-9._-]/g,'_');
       media=new MediaCache({fs:api.modules.native.fs,base:base+'/media',fetchData,settings:()=>({cacheMedia:archive.options.cacheAllImages,maxFileBytes:archive.options.maxFileBytes,maxMediaBytes:archive.options.maxMediaBytes}),
@@ -1050,6 +1419,7 @@ function createPlugin(api,definePlugin) {
         patchNativeBridge();
         patchInline();
         patchActions();
+        try{unpatches.push(channelTools.connect());}catch(e){diagnostics.hiddenChannelList='연결 실패 · 설정 목록 사용 가능: '+String(e.message);}
         for(const type of ['MESSAGE_CREATE','MESSAGE_UPDATE','MESSAGE_DELETE','MESSAGE_DELETE_BULK','LOAD_MESSAGES_SUCCESS','CHANNEL_SELECT','CONNECTION_OPEN','MESSAGE_LOGGER_V2_SELF_TEST'])on(type,e=>{
           syncSelectedChannel();
           if(type==='MESSAGE_UPDATE')diagnostics.editEventsSeen++;
@@ -1140,7 +1510,9 @@ function createStablePlugin(vd,host=globalThis){
     rm:path=>nativeFile.removeFile('documents',path),
   };
   const stores={};
-  for(const name of ['UserStore','SelectedChannelStore','ChannelStore','MessageStore','GuildStore','GuildMemberStore','RelationshipStore','UserGuildSettingsStore'])stores[name]=vd.metro.findByStoreName(name);
+  for(const name of ['UserStore','SelectedChannelStore','SelectedGuildStore','ChannelStore','ChannelListStore','CategoryCollapseStore','ReadStateStore','MessageStore','GuildStore','GuildRoleStore','GuildMemberStore','PermissionStore','RelationshipStore','UserGuildSettingsStore'])stores[name]=vd.metro.findByStoreName(name);
+  // These modules may initialize only when the guild sidebar is first opened.
+  for(const name of ['ChannelListStore','CategoryCollapseStore','ReadStateStore'])Object.defineProperty(stores,name,{get:()=>vd.metro.findByStoreName(name),configurable:true});
   const channelMessages=vd.metro.findByProps('_channelMessages');
   const messageStore=stores.MessageStore;
   stores.MessageStore=Object.create(messageStore||null);
@@ -1223,8 +1595,23 @@ function createStablePlugin(vd,host=globalThis){
     const guildId=message.guild_id||stores.ChannelStore?.getChannel?.(channelId)?.guild_id||'@me';
     return handle.call(linking,{guildId,channelId,messageId,navigationSettings:{navigationReplace:true}});
   }
-  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.16',react:{React:common.React,ReactNative:common.ReactNative},
-    discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},native:{FileModule:nativeFile,waitForNativeRows,waitForNativeBridge},
+  function waitForHiddenChannelRenderer(callback,onStatus){
+    let canceled=false,timer,undo,scans=0;
+    function scan(){if(canceled)return;try{
+      const mod=vd.metro.findByFilePath?.('modules/channel_list_v2/native/renderRedesignChannelListItem.tsx',false);
+      if(typeof mod?.renderChannelListItem==='function'){
+        const constants=vd.metro.findByFilePath?.('modules/channel_list_v2/native/RedesignChannelListConstants.tsx',false);
+        undo=callback(mod,'renderChannelListItem',constants?.getScaledChannelRowHeight);
+        onStatus('숨김 채널 행 connected');return;
+      }
+      onStatus('채널 목록 탐색 중 · 설정 목록 사용 가능');
+    }catch(e){onStatus('채널 목록 연결 오류: '+String(e.message));}
+      timer=setTimeout(scan,++scans<30?1000:30000);
+    }
+    scan();return()=>{canceled=true;clearTimeout(timer);undo?.();};
+  }
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.5.0',react:{React:common.React,ReactNative:common.ReactNative},
+    discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},permissions:{get constants(){try{return common.constants?.Permissions||{};}catch(_){return {};}}},native:{FileModule:nativeFile,waitForNativeRows,waitForNativeBridge,waitForHiddenChannelRenderer,get createChannelRecord(){return vd.metro.findByProps('createChannelRecord')?.createChannelRecord;}},
       actions:{jumpToMessage,ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},
     patcher:{instead:(parent,key,cb)=>patcher.instead(key,parent,cb)},
