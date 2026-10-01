@@ -590,6 +590,14 @@ function createPlugin(api,definePlugin) {
     if(node.props.children!=null)props.children=React.Children.map(node.props.children,c=>colorText(c,color,depth+1));
     return React.cloneElement(node,props);
   }
+  function nativeHistoryNodes(content,modifier,deleted,suffix={type:'subtext'}){
+    const body=clone(content);
+    const tag=modifier.noSuffix?null:{...clone(suffix),content:[{type:'text',content:' (수정됨)'}]};
+    // Native subtext supplies muted text and terminates each historical line.
+    // Current content stays outside the span with its original size and color.
+    if(deleted)return [{type:'subtext',content:[...body,...(tag?[tag]:[])]}];
+    return [...body,tag||{type:'text',content:'\n'}];
+  }
   function markTemporary(id){
     if(!id)return;
     temporaryIds.add(id);nativeSeen.delete(id);nativeRenderedSeen.delete(id);nativeRecordBefore.delete(id);nativeContentSeen.delete(id);nativePainted.delete(id);archive.cache.delete(id);
@@ -730,7 +738,7 @@ function createPlugin(api,definePlugin) {
           const live=previous(message.id,message.channelId);
           if(live)diagnostics.nativeBridgeStoreMatches++;
           if(isLocalTemporary(message)||isLocalTemporary(live)){markTemporary(message.id);continue;}
-          const signature=JSON.stringify(message.content),alreadyPainted=nativePainted.get(message.id)===signature;
+          const signature=JSON.stringify(message.content),painted=nativePainted.get(message.id),alreadyPainted=painted?.signature===signature;
           const priorContent=nativeContentSeen.get(message.id);
           if(live)observeRenderedMessage(live,message,'bridge');
           const r=archive.records.get(message.id);
@@ -745,13 +753,13 @@ function createPlugin(api,definePlugin) {
           if(!alreadyPainted&&typeof raw?.content==='string'&&(plain==null||plain===raw.content))nativeContentSeen.set(message.id,{body:raw.content,nodes:clone(message.content)});
           if(!r||r.localTemporary||!archive.options.inlineEnabled||archive.options.streamMode)continue;
           const edits=verifiedEdits(archive,message.id),deleted=archive.canShowDeleted(r),modifier=archive.modifiers.get(message.id)||{};
-          if(edits.length&&!alreadyPainted){
+          const current=alreadyPainted?painted.current:message.content;
+          if(edits.length&&(!alreadyPainted||painted.deleted!==deleted)){
             const nodes=[];
             for(const version of edits){
-              nodes.push(...clone(version.nativeContent||[{type:'text',content:version.message.content}]));
-              nodes.push(modifier.noSuffix?{type:'text',content:'\n'}:{type:'subtext',content:[{type:'text',content:' (수정됨)'}]});
+              nodes.push(...nativeHistoryNodes(version.nativeContent||[{type:'text',content:version.message.content}],modifier,deleted));
             }
-            if(modifier.editNum==null)nodes.push(...message.content);
+            if(modifier.editNum==null)nodes.push(...clone(current));
             message.content=nodes;message.edited=null;changed=true;diagnostics.nativeBridgeHistoriesShown++;
           }
           if(edits.length||deleted&&!archive.noTint.has(message.id)){
@@ -759,9 +767,9 @@ function createPlugin(api,definePlugin) {
             row.backgroundHighlight={...row.backgroundHighlight,backgroundColor:process(deleted?'#ed424533':'#949ba422'),gutterColor:process(deleted?archive.options.deletedMessageColor:archive.options.editedMessageColor)};
             changed=true;
           }
-          if(deleted){message.edited='삭제됨';changed=true;}
+          if(deleted&&!edits.length){message.edited='삭제됨';changed=true;}
           else if(edits.length&&message.edited!=null){message.edited=null;changed=true;}
-          if(edits.length)nativePainted.set(message.id,JSON.stringify(message.content));
+          if(edits.length)nativePainted.set(message.id,{signature:JSON.stringify(message.content),deleted,current:clone(current)});
         }
         const cap=archive.options.messageCacheCap;
         for(const map of [nativeContentSeen,nativePainted])while(map.size>cap)map.delete(map.keys().next().value);
@@ -810,6 +818,7 @@ function createPlugin(api,definePlugin) {
         const deleted=archive.canShowDeleted(r),edits=verifiedEdits(archive,message.id),modifier=archive.modifiers.get(message.id)||{};
         if(!generated||typeof generated!=='object')return generated;
         const row={...generated,message:generated.message?{...generated.message}:generated.message};
+        const currentContent=Array.isArray(row.message?.content)?clone(row.message.content):null;
         let historyApplied=false;
         if(edits.length&&typeof records.createMessageRecord==='function'){
           // Native `edited` is appended once at the very end of a row. For
@@ -828,9 +837,9 @@ function createPlugin(api,definePlugin) {
               if(!modifier.noSuffix&&!subtext)throw Error('native subtext node unavailable');
               const append=value=>{if(!Array.isArray(value))throw Error('native content array required');parts.push(...value);};
               for(const version of edits){
-                append(renderContent(version.message.content));
-                if(subtext)parts.push({...clone(subtext),content:[{type:'text',content:' (수정됨)'}]});
-                else append(separator);
+                const content=renderContent(version.message.content);
+                if(deleted){if(!Array.isArray(content))throw Error('native content array required');parts.push(...nativeHistoryNodes(content,modifier,true,subtext||{type:'subtext'}));}
+                else{append(content);if(subtext)parts.push({...clone(subtext),content:[{type:'text',content:' (수정됨)'}]});else append(separator);}
               }
               if(modifier.editNum==null)append(row.message.content);
               row.message.content=parts;
@@ -869,8 +878,8 @@ function createPlugin(api,definePlugin) {
         if((deleted&&!archive.noTint.has(message.id))||edits.length){
           row.backgroundHighlight={...row.backgroundHighlight,backgroundColor:process(deleted?'#ed424533':'#949ba422'),gutterColor:process(color)};
         }
-        if(row.message){row.message={...row.message,edited:deleted?'삭제됨':edits.length?null:row.message.edited};}
-        if(historyApplied&&Array.isArray(row.message?.content))nativePainted.set(message.id,JSON.stringify(row.message.content));
+        if(row.message){row.message={...row.message,edited:edits.length?null:deleted?'삭제됨':row.message.edited};}
+        if(historyApplied&&Array.isArray(row.message?.content))nativePainted.set(message.id,{signature:JSON.stringify(row.message.content),deleted,current:currentContent});
         return row;
       }));
       diagnostics.nativeRows='RowManager.generate connected';inlineReady=true;notify();
@@ -894,14 +903,14 @@ function createPlugin(api,definePlugin) {
         const r=archive.records.get(message.id);if(!r||r.localTemporary||isLocalTemporary(message)||!(r.deletedAt||r.history.length))return result;
         if(!archive.canShowDeleted(r)&&!verifiedEdits(archive,message.id).length)return result;
         try {
-          const shown=archive.canShowDeleted(r);const modifier=archive.modifiers.get(message.id)||{};
-          const painted=shown&&!archive.noTint.has(message.id)?(archive.options.useAlternativeDeletedStyle?React.createElement(RN.View,{style:{backgroundColor:'#ed424533'}},result):typeof r.message.content==='string'&&r.message.content.length?React.createElement(RN.Text,{style:{color:archive.options.deletedMessageColor,fontSize:16}},r.message.content):colorText(result,archive.options.deletedMessageColor)):result;
+          const shown=archive.canShowDeleted(r),edits=verifiedEdits(archive,message.id),editedDeletion=shown&&edits.length>0;const modifier=archive.modifiers.get(message.id)||{};
+          const painted=editedDeletion?result:shown&&!archive.noTint.has(message.id)?(archive.options.useAlternativeDeletedStyle?React.createElement(RN.View,{style:{backgroundColor:'#ed424533'}},result):typeof r.message.content==='string'&&r.message.content.length?React.createElement(RN.Text,{style:{color:archive.options.deletedMessageColor,fontSize:16}},r.message.content):colorText(result,archive.options.deletedMessageColor)):result;
           const children=[];
-          if(shown)children.unshift(React.createElement(RN.Text,{key:'deleted',style:{color:'#ed4245',fontSize:11}},'삭제된 메시지'));
-          for(const version of verifiedEdits(archive,message.id))children.push(React.createElement(RN.Text,{key:'edit-'+version.index,style:{color:archive.options.editedMessageColor,opacity:0.7}},version.message.content,modifier.noSuffix?null:React.createElement(RN.Text,{style:{color:'#949ba4',fontSize:11,opacity:1}},' (수정됨)')));
+          if(shown&&!editedDeletion)children.unshift(React.createElement(RN.Text,{key:'deleted',style:{color:'#ed4245',fontSize:11}},'삭제된 메시지'));
+          for(const version of edits)children.push(React.createElement(RN.Text,{key:'edit-'+version.index,style:{color:archive.options.editedMessageColor,opacity:0.7}},version.message.content,modifier.noSuffix?null:React.createElement(RN.Text,{style:{color:'#949ba4',fontSize:11,opacity:1}},' (수정됨)')));
           if(modifier.editNum==null)children.push(painted);
           if(verifiedEdits(archive,message.id).length<Math.max(0,r.history.length-(r.verifiedHistoryStart??r.history.length))&&!r.editsHidden&&archive.options.showEditedMessages)children.push(React.createElement(RN.Pressable,{key:'all',onPress:()=>{archive.modifiers.set(message.id,{showAllEdits:true});refreshChat(message.id);}},React.createElement(RN.Text,{style:{color:'#949ba4'}},'수정 이력 모두 보기')));
-          return React.createElement(RN.View,{style:verifiedEdits(archive,message.id).length?{backgroundColor:'#949ba422'}:undefined},...children);
+          return React.createElement(RN.View,{style:editedDeletion&&!archive.noTint.has(message.id)?{backgroundColor:'#ed424533'}:edits.length?{backgroundColor:'#949ba422'}:undefined},...children);
         }catch(_){return result;}
       });
       unpatches.push(undo);diagnostics.reactContent='MessageContent connected';inlineReady=true;notify();
@@ -937,9 +946,9 @@ function createPlugin(api,definePlugin) {
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
     const logs=(archive?.logs(query,kind)||[]).filter(r=>!r.localTemporary&&!isLocalTemporary(r.message)&&(kind==='sent'||r.deletedAt||verifiedEdits(archive,r.message.id).length));
     const proofStats=archive?{verified:[...archive.records.values()].filter(r=>Number.isInteger(r.verifiedHistoryStart)&&r.editEvidenceSource).length,visible:[...archive.records.keys()].filter(id=>verifiedEdits(archive,id).length).length}:undefined;
-    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.12',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.13',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
     const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
-    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.12'),{fontSize:22,fontWeight:'bold'}),
+    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.13'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
       text('실제 화면 호출: updateRows '+(diagnostics.nativeBridgeMessageRows||0)+' · RowManager '+(diagnostics.nativeRowsGenerated||0)+' · 레코드 갱신 '+(diagnostics.nativeRecordUpdatesSeen||0),{color:'#949ba4',fontSize:12}),
       h(View,{style:{flexDirection:'row'}},button('연결 진단 보기',()=>setDiagnosticOpen(true)),button('진단 복사',copyDiagnostic)),
@@ -1168,7 +1177,7 @@ function createStablePlugin(vd,host=globalThis){
     }
     scan();return()=>{canceled=true;clearTimeout(timer);};
   }
-  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.12',react:{React:common.React,ReactNative:common.ReactNative},
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.13',react:{React:common.React,ReactNative:common.ReactNative},
     discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},native:{FileModule:nativeFile,waitForNativeRows,waitForNativeBridge},
       actions:{ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},
