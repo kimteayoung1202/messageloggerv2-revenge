@@ -357,9 +357,17 @@ function createUI(api,getEngine,save,refresh,backup,getStatus){
   function Actions({record,editNum,onClose}){const engine=getEngine();if(!record||!engine)return null;
     const id=record.message.id,modifier=engine.modifiers.get(id)||{};
     function act(fn){return ()=>{fn();save();refresh(id);onClose();};}
+    async function jump(){
+      try{
+        const navigate=api.discord.actions?.jumpToMessage;
+        if(typeof navigate!=='function')throw Error('리벤지 내부 메시지 이동 기능을 찾지 못했습니다.');
+        onClose();
+        await navigate(record.message);
+      }catch(e){RN.Alert.alert('메시지 이동 실패',String(e?.message||e));}
+    }
     return h(RN.Modal,{visible:true,transparent:true,onRequestClose:onClose},h(RN.View,{style:{flex:1,justifyContent:'center',padding:24,backgroundColor:'#000a'}},
       h(RN.ScrollView,{style:{maxHeight:'80%',padding:12,backgroundColor:'#2b2d31',borderRadius:10}},text(engine.options.contextmenuSubmenuName,{fontSize:18}),
-        button('메시지로 이동',()=>RN.Linking.openURL('https://discord.com/channels/'+(record.message.guild_id||'@me')+'/'+record.message.channel_id+'/'+id)),
+        button('메시지로 이동',jump),
         button('내용 공유',()=>RN.Share.share({message:editNum==null?record.message.content:record.history[editNum]?.message.content||''})),
         record.deletedAt?button(record.hidden?'삭제 메시지 다시 표시':'삭제 메시지 숨기기',act(()=>{record.hidden=!record.hidden;})):null,
         record.deletedAt?button(engine.noTint.has(id)?'삭제 색상 추가':'삭제 색상 제거',act(()=>engine.noTint.has(id)?engine.noTint.delete(id):engine.noTint.add(id))):null,
@@ -946,9 +954,9 @@ function createPlugin(api,definePlugin) {
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
     const logs=(archive?.logs(query,kind)||[]).filter(r=>!r.localTemporary&&!isLocalTemporary(r.message)&&(kind==='sent'||r.deletedAt||verifiedEdits(archive,r.message.id).length));
     const proofStats=archive?{verified:[...archive.records.values()].filter(r=>Number.isInteger(r.verifiedHistoryStart)&&r.editEvidenceSource).length,visible:[...archive.records.keys()].filter(id=>verifiedEdits(archive,id).length).length}:undefined;
-    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.13',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.14',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
     const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
-    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.13'),{fontSize:22,fontWeight:'bold'}),
+    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.14'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
       text('실제 화면 호출: updateRows '+(diagnostics.nativeBridgeMessageRows||0)+' · RowManager '+(diagnostics.nativeRowsGenerated||0)+' · 레코드 갱신 '+(diagnostics.nativeRecordUpdatesSeen||0),{color:'#949ba4',fontSize:12}),
       h(View,{style:{flexDirection:'row'}},button('연결 진단 보기',()=>setDiagnosticOpen(true)),button('진단 복사',copyDiagnostic)),
@@ -1177,9 +1185,20 @@ function createStablePlugin(vd,host=globalThis){
     }
     scan();return()=>{canceled=true;clearTimeout(timer);};
   }
-  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.13',react:{React:common.React,ReactNative:common.ReactNative},
+  async function jumpToMessage(message){
+    const channelId=message?.channel_id,messageId=message?.id;
+    if(!channelId||!messageId)throw Error('메시지 또는 채널 ID가 없습니다.');
+    // The pinned Revenge URL polyfill exposes Discord's internal content-link
+    // handler. Its openURL/openDeeplink aliases delegate to Android Linking,
+    // so neither may be used here, including as an error fallback.
+    const linking=common.url,handle=linking?.handleMessageLinking;
+    if(typeof handle!=='function')throw Error('리벤지 내부 메시지 이동 기능을 찾지 못했습니다.');
+    const guildId=message.guild_id||stores.ChannelStore?.getChannel?.(channelId)?.guild_id||'@me';
+    return handle.call(linking,{guildId,channelId,messageId,navigationSettings:{navigationReplace:true}});
+  }
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.14',react:{React:common.React,ReactNative:common.ReactNative},
     discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},native:{FileModule:nativeFile,waitForNativeRows,waitForNativeBridge},
-      actions:{ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
+      actions:{jumpToMessage,ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},
     patcher:{instead:(parent,key,cb)=>patcher.instead(key,parent,cb)},
     jsonStorage:{pluginStoragePathFor:(_id,path)=>'message-logger/'+path},
