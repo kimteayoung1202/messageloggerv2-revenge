@@ -651,33 +651,54 @@ function createPlugin(api,definePlugin) {
     }
     const record=archive.records.get(m.id);
     const proven=record&&['event','native','record','bridge'].includes(record.editEvidenceSource)&&Number.isInteger(record.verifiedHistoryStart);
-    const prior=before&&before.content!==m.content?before:nativeSeen.get(m.id)||(proven?record.message:null);
+    const prior=before&&before.id===m.id&&before.channel_id===m.channel_id&&before.content!==m.content?before:nativeSeen.get(m.id)||(proven?record.message:null);
     const priorTime=Math.max(Date.parse(prior?.edited_timestamp)||0,proven?Date.parse(record.message.edited_timestamp)||0:0);
     const skips=diagnostics.nativeEditChecks||(diagnostics.nativeEditChecks={noBaseline:0,unchanged:0,noTime:0,staleTime:0,alreadySaved:0,filtered:0,captured:0});
     if(!prior)skips.noBaseline++;
     else if(prior.content===m.content)skips.unchanged++;
     else if(!validEditTime(m.edited_timestamp))skips.noTime++;
     else if(Date.parse(m.edited_timestamp)<=priorTime)skips.staleTime++;
-    else if(record?.message.content===m.content)skips.alreadySaved++;
+    else if(proven&&record.message.content===m.content)skips.alreadySaved++;
     // A render can contain an older or timestamp-less record. It must never
     // revoke proof from an actual update; only a server load may do that.
     if(prior&&prior.channel_id===m.channel_id&&prior.content!==m.content&&validEditTime(m.edited_timestamp)
-      &&Date.parse(m.edited_timestamp)>priorTime&&record?.message.content!==m.content){
+      &&Date.parse(m.edited_timestamp)>priorTime&&(!proven||record.message.content!==m.content)){
       // A genuine native edit requires both a changed body and an advancing
       // server edit timestamp. Content-only refreshes are never edits.
       const count=record?.history.length||0;
-      if(record&&!proven)record.message.content=prior.content;
-      archive.cache.set(m.id,clone(prior));
-      const out=archive.process({type:'MESSAGE_UPDATE',message:m});
+      const channel=archive.channel(m.channel_id);
+      const author=archive.context.getUser?.(m.author.id)||m.author;
+      const allowed=channel&&archive.policy(channel)&&archive.authorAllowed(author,{type:'MESSAGE_UPDATE'})&&[0,19,20].includes(m.type)&&!(m.type===20&&(m.flags||0)&64);
+      const tail=record?.history[count-1];
+      // The archive may already contain this edge without display proof. A
+      // matching current body is not evidence that the history is renderable.
+      // Verify only the tail witnessed in this live old -> new transition.
+      const reconcile=!proven&&record?.message.content===m.content&&allowed&&tail
+        &&prior.author?.id===m.author.id&&!isLocalTemporary(prior)
+        &&tail.message?.id===m.id&&tail.message.channel_id===m.channel_id
+        &&tail.message.author?.id===m.author.id&&!isLocalTemporary(tail.message)
+        &&tail.message.content===prior.content;
+      let out,proofStart=count;
+      if(reconcile){
+        proofStart=count-1;out={effects:[{type:'changed'}]};
+        diagnostics.nativeHistoriesReconciled=(diagnostics.nativeHistoriesReconciled||0)+1;
+      }else{
+        // Run normal engine filters on a staged copy. A rejected edit must not
+        // overwrite the archived current body just to test the transition.
+        if(record&&!proven){const staged=clone(record);staged.message.content=prior.content;archive.records.set(m.id,staged);}
+        archive.cache.set(m.id,clone(prior));
+        out=archive.process({type:'MESSAGE_UPDATE',message:m});
+      }
       const changed=archive.records.get(m.id);
-      if(changed&&changed.history.length>count){
-        if(!proven)changed.verifiedHistoryStart=count;
+      if(changed&&(reconcile||changed.history.length>count)){
+        if(!proven)changed.verifiedHistoryStart=proofStart;
         changed.editEvidence=m.edited_timestamp;changed.editEvidenceSource=source;
         changed.message.edited_timestamp=m.edited_timestamp;
         diagnostics.nativeObservedEdits=(diagnostics.nativeObservedEdits||0)+1;
         if(source==='record')diagnostics.nativeRecordEdits=(diagnostics.nativeRecordEdits||0)+1;
         skips.captured++;nativeRecordBefore.delete(m.id);
       }else{
+        if(record&&!proven)archive.records.set(m.id,record);
         skips.filtered++;
         const channel=archive.channel(m.channel_id);
         diagnostics.nativeEditFilter={channelFound:!!channel,selected:archive.selected===m.channel_id,channelAllowed:!!channel&&archive.policy(channel),authorAllowed:archive.authorAllowed(m.author,{type:'MESSAGE_UPDATE'})};
@@ -916,9 +937,9 @@ function createPlugin(api,definePlugin) {
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
     const logs=(archive?.logs(query,kind)||[]).filter(r=>!r.localTemporary&&!isLocalTemporary(r.message)&&(kind==='sent'||r.deletedAt||verifiedEdits(archive,r.message.id).length));
     const proofStats=archive?{verified:[...archive.records.values()].filter(r=>Number.isInteger(r.verifiedHistoryStart)&&r.editEvidenceSource).length,visible:[...archive.records.keys()].filter(id=>verifiedEdits(archive,id).length).length}:undefined;
-    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.11',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.12',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
     const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
-    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.11'),{fontSize:22,fontWeight:'bold'}),
+    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.12'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
       text('실제 화면 호출: updateRows '+(diagnostics.nativeBridgeMessageRows||0)+' · RowManager '+(diagnostics.nativeRowsGenerated||0)+' · 레코드 갱신 '+(diagnostics.nativeRecordUpdatesSeen||0),{color:'#949ba4',fontSize:12}),
       h(View,{style:{flexDirection:'row'}},button('연결 진단 보기',()=>setDiagnosticOpen(true)),button('진단 복사',copyDiagnostic)),
@@ -1147,7 +1168,7 @@ function createStablePlugin(vd,host=globalThis){
     }
     scan();return()=>{canceled=true;clearTimeout(timer);};
   }
-  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.11',react:{React:common.React,ReactNative:common.ReactNative},
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.12',react:{React:common.React,ReactNative:common.ReactNative},
     discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},native:{FileModule:nativeFile,waitForNativeRows,waitForNativeBridge},
       actions:{ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},
