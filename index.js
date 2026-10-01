@@ -608,14 +608,25 @@ function createPlugin(api,definePlugin) {
         const row=original.apply(this,[input,...args.slice(1)]);
         if(!row||typeof row!=='object')return row;
         if(typeof diagnostics.nativeTextShape!=='object'){
+          let remaining=500;
+          const seen=new WeakSet();
           const shape=(value,depth=0)=>{
-            if(depth>3)return typeof value;
             if(value==null)return String(value);
-            if(Array.isArray(value))return value.length?[shape(value[0],depth+1)]:'empty array';
             if(typeof value!=='object')return typeof value;
-            if(depth>=3)return 'object';
-            const out={};for(const key of Object.keys(value).slice(0,35))out[key]=shape(value[key],depth+1);return out;
+            if(depth>=7||remaining--<=0)return 'object (depth/budget limit)';
+            if(seen.has(value))return 'object (shared reference)';
+            seen.add(value);
+            if(Array.isArray(value))return value.length?value.slice(0,2).map(v=>shape(v,depth+1)):'empty array';
+            const out={};
+            // Root fields must not be truncated: native content follows metadata.
+            const keys=Object.keys(value);
+            keys.sort((a,b)=>Number(/content|text|span|markdown|style|attribute/i.test(b))-Number(/content|text|span|markdown|style|attribute/i.test(a)));
+            for(const key of keys){
+              try{out[key]=shape(value[key],depth+1);}catch(e){out[key]='unreadable';}
+            }
+            return out;
           };
+          diagnostics.nativeMessageKeys=Object.keys(row.message||{});
           diagnostics.nativeTextShape=shape(row.message);notify();
         }
         const color=deleted?archive.options.deletedMessageColor:archive.options.editedMessageColor;
@@ -687,9 +698,9 @@ function createPlugin(api,definePlugin) {
     const toggle=(label,key)=>h(View,{key,style:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',paddingVertical:6}},
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
     const logs=archive?.logs(query,kind)||[];
-    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.4',status,started,inlineReady,...diagnostics},null,2);
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.5',status,started,inlineReady,...diagnostics},null,2);
     const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
-    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.4'),{fontSize:22,fontWeight:'bold'}),
+    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.5'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
       text('채팅 표시: '+(inlineReady?(diagnostics.nativeRows?'네이티브 RowManager 연결됨':'React MessageContent 연결됨'):'이 Discord 빌드의 렌더러를 찾지 못함 — 기록 화면에서 확인'),{color:'#949ba4',fontSize:12}),
       h(View,{style:{flexDirection:'row'}},button('연결 진단 보기',()=>setDiagnosticOpen(true)),button('진단 복사',copyDiagnostic)),
