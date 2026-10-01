@@ -601,7 +601,7 @@ function createPlugin(api,definePlugin) {
           // RowManager serializes native text; build a temporary display record.
           // Persisted raw content and MessageStore contents retain their normal values.
           const raw=normalizeMessage(message,r.message.channel_id,r.message);
-          const versions=edits.map(v=>v.message.content+(modifier.noSuffix?'':' (수정 이전)'));
+          const versions=edits.map(v=>v.message.content+(modifier.noSuffix?'':' (수정됨)'));
           raw.content=[...versions,...(modifier.editNum==null?[r.message.content]:[])].join('\n');
           try{input={...data,message:records.createMessageRecord(raw,message.reactions)};}catch(e){diagnostics.nativeHistory=e.message;}
         }
@@ -612,7 +612,7 @@ function createPlugin(api,definePlugin) {
         if((deleted&&!archive.noTint.has(message.id))||edits.length){
           row.backgroundHighlight={...row.backgroundHighlight,backgroundColor:process(deleted?'#ed424533':'#949ba422'),gutterColor:process(color)};
         }
-        if(row.message){row.message={...row.message,edited:deleted?'삭제됨':edits.length?'수정 이력 '+r.history.length+'개':row.message.edited};}
+        if(row.message){row.message={...row.message,edited:deleted?'삭제됨':edits.length?'수정됨':row.message.edited};}
         return row;
       }));
       diagnostics.nativeRows='RowManager.generate connected';inlineReady=true;notify();
@@ -700,7 +700,7 @@ function createPlugin(api,definePlugin) {
         text(r.message.author?.global_name||r.message.author?.username||r.message.author?.id||'알 수 없음',{fontWeight:'bold',marginTop:4}),
         text('채널 '+r.message.channel_id+' · '+new Date(r.deletedAt||r.seenAt).toLocaleString(),{color:'#949ba4',fontSize:11}),
         ...r.history.map((version,i)=>h(Pressable,{key:i,onLongPress:()=>setAction({record:r,editNum:i}),style:{marginTop:8,borderLeftWidth:2,borderLeftColor:'#949ba4',paddingLeft:8}},
-          text('수정 이전 '+(i+1)+' · '+new Date(version.at).toLocaleString(),{color:'#949ba4',fontSize:11}),
+          text('수정됨 · '+new Date(version.at).toLocaleString(),{color:'#949ba4',fontSize:11}),
           text(version.message.content||'(텍스트 없음)',{color:'#949ba4'}))),
         text(r.message.content||'(텍스트 없음)',{color:r.deletedAt?'#ed4245':'#f2f3f5',marginTop:8}),
         ...(r.message.attachments||[]).map((a,i)=>h(Attachment,{key:a.id||i,attachment:a})),

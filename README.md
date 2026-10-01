@@ -1,4 +1,4 @@
-# Message Logger Compatibility 0.4.1 — Revenge 1.11.6
+# Message Logger Compatibility 0.4.2 — Revenge 1.11.6
 
 MessageLoggerV2 1.10.4의 메시지 처리 동작을 기준으로 작성한 독립 구현입니다.
 원본 코드를 포함하거나 재배포하지 않습니다. 공식 MLV2 배포물도 아닙니다.
@@ -18,7 +18,7 @@ Revenge의 해당 커밋에서 Vendetta 호환 로더와 API를 확인했습니�
 2. Revenge 플러그인 URL 설치에 해당 디렉터리 주소를 넣으세요.
 3. 플러그인 설정에서 기록과 연결 상태를 확인하세요.
 
-ZIP 자체를 설치 URL로 쓸 수는 없습니다. 이번 작업에서 GitHub에 업로드하지 않았습니다.
+ZIP 자체를 설치 URL로 쓸 수는 없습니다. GitHub 저장소에 배포 파일을 게시했습니다.
 이전 배포물을 교체하려면 같은 설치 디렉터리에 두 파일을 함께 올리세요. manifest의 SHA-256 hash는 빌드할 때 갱신됩니다.
 두 버전을 함께 켜지 마세요.
 
@@ -96,7 +96,7 @@ message:메시지ID
 설정에서 원본 MLV2의 `data.messageRecord` 형식 또는 이 구현의 백업 JSON을 붙여 넣어 가져올 수 있습니다.
 계정 ID가 있는 백업은 같은 계정만 가져옵니다.
 
-## 0.4.1 모바일 연결 수정
+## 0.4.2 모바일 연결 수정
 
 - NativeFileModule 저장 형식은 그대로 유지합니다. 기존 로그를 지우지 않습니다.
 - MessageRecord 프로토타입 getter와 editedTimestamp를 정규화합니다.
