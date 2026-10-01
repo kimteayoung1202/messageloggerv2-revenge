@@ -1,13 +1,15 @@
 {
-  "format": 1,
-  "id": "com.local.message-logger",
-  "name": "Message Logger",
-  "description": "Local deleted-message and edit history for messages seen on this device.",
-  "author": "Local",
-  "version": "0.1.0",
-  "dependencies": {
-    "revenge.api": { "version": ">=1 <2" },
-    "discord": { "version": "*" }
+  "name": "Message Logger Compatibility",
+  "description": "Independent MLV2 behavior implementation for Revenge 1.11.6 (1b1d297). Android 347012 runtime verification pending.",
+  "authors": [
+    {
+      "name": "Local"
+    }
+  ],
+  "main": "index.js",
+  "version": "0.4.0",
+  "vendetta": {
+    "icon": "ic_message"
   },
-  "dist": { "script": "index.js" }
+  "hash": "8652c63989fc62e30ebc55e4e7ea4a9823aaf3716b2df3f209633c737745cf77"
 }
