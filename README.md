@@ -1,4 +1,4 @@
-# Message Logger Compatibility 0.4.3 — Revenge 1.11.6
+# Message Logger Compatibility 0.4.4 — Revenge 1.11.6
 
 MessageLoggerV2 1.10.4의 메시지 처리 동작을 기준으로 작성한 독립 구현입니다.
 원본 코드를 포함하거나 재배포하지 않습니다. 공식 MLV2 배포물도 아닙니다.
@@ -135,3 +135,7 @@ npm test
 플랫폼 API 기준: https://github.com/revenge-mod/revenge-bundle/tree/1b1d297416594087769987908e5fc09af36b7e6e
 
 0.4.3: React MessageContent와 기록 화면의 이전 본문은 opacity 0.7입니다. 네이티브 채팅의 문자 구간별 opacity는 아직 구현하지 않았습니다. 설정을 펼치면 nativeTextShape에 본문 값 없이 타입과 키 구조만 표시하여 기기의 렌더러 구조를 확인할 수 있습니다.
+
+0.4.4: 설정 첫 화면에 버전과 연결 진단 보기/진단 복사 버튼을 표시합니다. nativeTextShape는 아직 수집하지 못했어도 항목을 표시합니다. RowManager default export를 명시적으로 해석하고 탐색 상태를 진단에 표시합니다.
+
+0.4.4 수정 오인 방지: MESSAGE_UPDATE의 본문 차이만으로 수정 시각을 만들어 넣지 않습니다. edited_timestamp / editedTimestamp가 있는 실제 수정만 처리합니다. 0.4.1~0.4.3의 추론 동작은 제거했습니다. 이미 저장한 이력은 보존합니다.

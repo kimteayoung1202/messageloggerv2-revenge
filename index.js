@@ -500,7 +500,7 @@ const {createUI}=require('./ui');
 const {Journal,MediaCache,fetchData}=require('./io');
 function createPlugin(api,definePlugin) {
   let React,RN,stores,archive,journal,media,timer,base,UI,maintenanceTimer,backupTimer,selfTestTimer,fetchActions,started=false,dirty=false;
-  let diagnostics={},lastTest=0,stopping=false;const fetchTimes=new Map();
+  let diagnostics={nativeTextShape:'아직 수집되지 않음'},lastTest=0,stopping=false;const fetchTimes=new Map();
   let status='시작 대기',inlineReady=false,unpatches=[],listeners=new Set();
   const notify=()=>{for(const cb of listeners)cb();};
   const error=e=>{status=String(e?.message||e);notify();console.error('[Message Archive]',e);};
@@ -607,8 +607,9 @@ function createPlugin(api,definePlugin) {
         }
         const row=original.apply(this,[input,...args.slice(1)]);
         if(!row||typeof row!=='object')return row;
-        if(!diagnostics.nativeTextShape){
+        if(typeof diagnostics.nativeTextShape!=='object'){
           const shape=(value,depth=0)=>{
+            if(depth>3)return typeof value;
             if(value==null)return String(value);
             if(Array.isArray(value))return value.length?[shape(value[0],depth+1)]:'empty array';
             if(typeof value!=='object')return typeof value;
@@ -626,7 +627,7 @@ function createPlugin(api,definePlugin) {
         return row;
       }));
       diagnostics.nativeRows='RowManager.generate connected';inlineReady=true;notify();
-    }));
+    },stage=>{if(diagnostics.nativeRows!==stage){diagnostics.nativeRows=stage;notify();}}));
   }
   function patchInline() {
     // Only patch an identified named export; no scan/string heuristics over every React module.
@@ -677,7 +678,7 @@ function createPlugin(api,definePlugin) {
     // The settings screen can be opened while the plugin is disabled.
     if(!React||!RN){React=api.react.React;RN=api.react.ReactNative;}
     const [,refresh]=React.useState(0),[query,setQuery]=React.useState(''),[kind,setKind]=React.useState('all');
-    const [action,setAction]=React.useState(null);
+    const [action,setAction]=React.useState(null),[diagnosticOpen,setDiagnosticOpen]=React.useState(false);
     const [limit,setLimit]=React.useState(archive?.options.renderCap||50);
     React.useEffect(()=>{const fn=()=>refresh(n=>n+1);listeners.add(fn);return()=>listeners.delete(fn);},[]);
     const h=React.createElement,{View,Text,Pressable,Switch,TextInput,FlatList}=RN;
@@ -686,9 +687,12 @@ function createPlugin(api,definePlugin) {
     const toggle=(label,key)=>h(View,{key,style:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',paddingVertical:6}},
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
     const logs=archive?.logs(query,kind)||[];
-    const header=h(View,null,text('Message Archive',{fontSize:22,fontWeight:'bold'}),
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.4',status,started,inlineReady,...diagnostics},null,2);
+    const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
+    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.4'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
       text('채팅 표시: '+(inlineReady?(diagnostics.nativeRows?'네이티브 RowManager 연결됨':'React MessageContent 연결됨'):'이 Discord 빌드의 렌더러를 찾지 못함 — 기록 화면에서 확인'),{color:'#949ba4',fontSize:12}),
+      h(View,{style:{flexDirection:'row'}},button('연결 진단 보기',()=>setDiagnosticOpen(true)),button('진단 복사',copyDiagnostic)),
       UI?h(UI.Options):null,
       h(TextInput,{value:query,onChangeText:v=>{setQuery(v);setLimit(archive?.options.renderCap||50);},placeholder:'내용 / 작성자 / 채널 ID 검색',placeholderTextColor:'#949ba4',
         style:{color:'white',backgroundColor:'#232428',padding:10,borderRadius:6,marginVertical:12}}),
@@ -715,7 +719,7 @@ function createPlugin(api,definePlugin) {
         text(r.message.content||'(텍스트 없음)',{color:r.deletedAt?'#ed4245':'#f2f3f5',marginTop:8}),
         ...(r.message.attachments||[]).map((a,i)=>h(Attachment,{key:a.id||i,attachment:a})),
         ...(r.message.embeds||[]).map((e,i)=>text([e.title,e.description,e.url].filter(Boolean).join('\n'),{color:'#b5bac1',marginTop:6}))) });
-    return h(View,{style:{flex:1}},list,action&&UI?h(UI.Actions,{...action,onClose:()=>setAction(null)}):null);
+    return h(View,{style:{flex:1}},list,diagnosticOpen?h(RN.Modal,{visible:true,onRequestClose:()=>setDiagnosticOpen(false)},h(RN.ScrollView,{contentContainerStyle:{padding:20,backgroundColor:'#313338'}},button('닫기',()=>setDiagnosticOpen(false)),button('진단 복사',copyDiagnostic),text(diagnosticText,{fontSize:12,selectable:true}))):null,action&&UI?h(UI.Actions,{...action,onClose:()=>setAction(null)}):null);
   }
   const lifecycle={
     async start(){
@@ -742,12 +746,13 @@ function createPlugin(api,definePlugin) {
         writeBinary:typeof nativeFile?.writeFile==='function'?async(id,name,data)=>{const path=await nativeFile.writeFile('documents',binaryPath(id,name),data,'base64');return path.startsWith('file://')?path:'file://'+path;}:undefined,
         deleteBinary:typeof nativeFile?.removeFile==='function'?(id,name)=>nativeFile.removeFile('documents',binaryPath(id,name)):undefined,
         onChange:message=>{if(message)status=message;notify();}});
-      await media.start();started=true;stopping=false;diagnostics={inline:'not found',prefetch:'not found'};status='기록 중 · MLV2 기본 필터 사용';
+      await media.start();started=true;stopping=false;diagnostics={inline:'not found',prefetch:'not found',nativeRows:'탐색 대기',nativeTextShape:'아직 수집되지 않음',editEventsSeen:0};status='기록 중 · MLV2 기본 필터 사용';
       try {
         patchNativeRows();
         patchInline();
         patchActions();
         for(const type of ['MESSAGE_CREATE','MESSAGE_UPDATE','MESSAGE_DELETE','MESSAGE_DELETE_BULK','LOAD_MESSAGES_SUCCESS','CHANNEL_SELECT','CONNECTION_OPEN','MESSAGE_LOGGER_V2_SELF_TEST'])on(type,e=>{
+          if(type==='MESSAGE_UPDATE')diagnostics.editEventsSeen++;
           const normalized=e.message?{...e,message:rawMessage(e)}:e;
           const out=archive.process(normalized);effect(out.effects);
           if(out.event===null&&type!=='MESSAGE_LOGGER_V2_SELF_TEST'&&(!inlineReady||!archive.options.inlineEnabled||archive.options.streamMode))return e;
@@ -820,17 +825,19 @@ function createStablePlugin(vd,host=globalThis){
     }
     scan();return()=>{canceled=true;clearTimeout(timer);};
   }};
-  function waitForNativeRows(callback){
+  function waitForNativeRows(callback,onStatus=()=>{}){
     let canceled=false,timer;
     function scan(){if(canceled)return;
-      const rows=vd.metro.findByName?.('RowManager');
+      const rowModule=vd.metro.findByName?.('RowManager',false);
+      const rows=rowModule?.default||rowModule?.RowManager||rowModule;
+      onStatus(typeof rows?.prototype?.generate==='function'?'RowManager 발견 · 레코드 모듈 확인 중':'RowManager 탐색 중');
       const records=vd.metro.findByProps('createMessageRecord','updateMessageRecord');
       if(typeof rows?.prototype?.generate==='function'&&records){callback(rows.prototype,records);return;}
       timer=setTimeout(scan,1000);
     }
     scan();return()=>{canceled=true;clearTimeout(timer);};
   }
-  const api={react:{React:common.React,ReactNative:common.ReactNative},
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.4',react:{React:common.React,ReactNative:common.ReactNative},
     discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe},common:{flux:{Dispatcher:common.FluxDispatcher}},native:{FileModule:nativeFile,waitForNativeRows},
       actions:{ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},
@@ -868,9 +875,8 @@ function normalizeMessage(raw,channelId,old,type){
   if(raw.editedTimestamp!=null&&out.edited_timestamp==null){
     const time=raw.editedTimestamp;out.edited_timestamp=typeof time.toISOString==='function'?time.toISOString():time;
   }
-  // Some native update producers omit the gateway edit timestamp. Only infer
-  // an edit when an existing message's actual text changes, never embed-only updates.
-  if(type==='MESSAGE_UPDATE'&&!out.edited_timestamp&&typeof out.content==='string'&&typeof old?.content==='string'&&out.content!==old.content)out.edited_timestamp=new Date().toISOString();
+  // Native aliases are accepted, but missing timestamps are never invented.
+  // Content differences also occur in non-edit native refreshes.
   return out;
 }
 module.exports={normalizeMessage};
