@@ -494,13 +494,13 @@ module.exports={Journal,MediaCache,allowedUrl,fetchData};
 "./plugin":function(module,exports,require){
 'use strict';
 const {clone}=require('./core');
-const {normalizeMessage,validEditTime,verifiedEdits,isLocalTemporary}=require('./mobile');
+const {normalizeMessage,validEditTime,editTime,verifiedEdits,isLocalTemporary}=require('./mobile');
 const {Engine}=require('./engine');
 const {createUI}=require('./ui');
 const {Journal,MediaCache,fetchData}=require('./io');
 function createPlugin(api,definePlugin) {
   let React,RN,stores,archive,journal,media,timer,base,UI,maintenanceTimer,backupTimer,selfTestTimer,fetchActions,started=false,dirty=false;
-  let diagnostics={nativeTextShape:'아직 수집되지 않음'},lastTest=0,stopping=false;const fetchTimes=new Map(),nativeSeen=new Map(),temporaryIds=new Set(),temporaryRecords=new Map(),nativeContentSeen=new Map(),nativePainted=new Map();
+  let diagnostics={nativeTextShape:'아직 수집되지 않음'},lastTest=0,stopping=false;const fetchTimes=new Map(),nativeSeen=new Map(),nativeRenderedSeen=new Map(),nativeRecordBefore=new Map(),temporaryIds=new Set(),temporaryRecords=new Map(),nativeContentSeen=new Map(),nativePainted=new Map();
   let status='시작 대기',inlineReady=false,unpatches=[],listeners=new Set();
   const notify=()=>{for(const cb of listeners)cb();};
   const error=e=>{status=String(e?.message||e);notify();console.error('[Message Archive]',e);};
@@ -592,7 +592,7 @@ function createPlugin(api,definePlugin) {
   }
   function markTemporary(id){
     if(!id)return;
-    temporaryIds.add(id);nativeSeen.delete(id);archive.cache.delete(id);
+    temporaryIds.add(id);nativeSeen.delete(id);nativeRenderedSeen.delete(id);nativeRecordBefore.delete(id);nativeContentSeen.delete(id);nativePainted.delete(id);archive.cache.delete(id);
     const record=archive.records.get(id);
     if(record){temporaryRecords.set(id,{...clone(record),localTemporary:true});archive.records.delete(id);save();}
     while(temporaryIds.size>archive.options.messageCacheCap)temporaryIds.delete(temporaryIds.values().next().value);
@@ -608,23 +608,61 @@ function createPlugin(api,definePlugin) {
       archive.selected=selected;diagnostics.selectedChannelResynced=(diagnostics.selectedChannelResynced||0)+1;
     }
   }
-  function observeNativeMessage(message,before,source='native'){
+  function nativeBaseline(m){
+    const rendered=nativeRenderedSeen.get(m.id),candidate=nativeRecordBefore.get(m.id);
+    if(candidate?.after===m.content&&candidate.before.channel_id===m.channel_id)return candidate.before;
+    if(rendered&&rendered.channel_id===m.channel_id&&rendered.content!==m.content)return rendered;
+  }
+  function observeRenderedMessage(raw,rendered,source,trustedInput=false){
+    const m=normalizeMessage(raw);if(!m||typeof m.content!=='string'||!m.author?.id||isLocalTemporary(raw))return observeNativeMessage(raw,undefined,source);
+    const time=editTime(rendered?.editedTimestamp)||editTime(rendered?.edited_timestamp);
+    const times=diagnostics.nativeRenderedTimes||(diagnostics.nativeRenderedTimes={valid:0,empty:0,invalid:0});
+    times[time?'valid':rendered?.editedTimestamp==null?'empty':'invalid']++;
+    // Bridge rows may lag MessageStore. Pair the rendered timestamp with a body
+    // only when it is generated from this input, or is an exact plain-text match.
+    const matchingId=!rendered?.id||rendered.id===m.id;
+    const matchingChannel=!rendered?.channelId||rendered.channelId===m.channel_id;
+    const plain=Array.isArray(rendered?.content)&&rendered.content.every(n=>n.type==='text'&&typeof n.content==='string')
+      ?rendered.content.map(n=>n.content).join(''):null;
+    const matches=matchingId&&matchingChannel&&(trustedInput||plain===m.content);
+    observeNativeMessage(raw,nativeBaseline(m),source,matches?time:undefined);
+    if(matches){
+      if(time&&(!validEditTime(m.edited_timestamp)||Date.parse(time)>Date.parse(m.edited_timestamp)))m.edited_timestamp=time;
+      nativeRenderedSeen.set(m.id,m);
+      while(nativeRenderedSeen.size>archive.options.messageCacheCap)nativeRenderedSeen.delete(nativeRenderedSeen.keys().next().value);
+    }
+  }
+  function observeNativeMessage(message,before,source='native',renderedTime){
     syncSelectedChannel();
     if(isLocalTemporary(message)){markTemporary(message?.id);return;}
     const m=normalizeMessage(message);if(!m||typeof m.content!=='string'||!m.author?.id)return;
     temporaryIds.delete(m.id);
     diagnostics.nativeInputEditTime=validEditTime(m.edited_timestamp)?'valid':('editedTimestamp' in message||'edited_timestamp' in message)?'empty/invalid':'absent';
     diagnostics.nativeInputFields={content:typeof message.content,editedTimestamp:typeof message.editedTimestamp,edited_timestamp:typeof message.edited_timestamp};
+    const times=diagnostics.nativeInputTimes||(diagnostics.nativeInputTimes={valid:0,empty:0,unsupported:0});
+    const value=message.edited_timestamp??message.editedTimestamp;
+    times[validEditTime(m.edited_timestamp)?'valid':value==null?'empty':'unsupported']++;
+    if(value&&typeof value==='object')diagnostics.nativeTimeObject={toISOString:typeof value.toISOString,toISO:typeof value.toISO,toJSON:typeof value.toJSON};
     if(message.__vml_edits?.length||message.__vml_currentContent!==undefined){
       diagnostics.externalNativeHistorySeen=true;return;
+    }
+    if(validEditTime(renderedTime)&&(!validEditTime(m.edited_timestamp)||Date.parse(renderedTime)>Date.parse(m.edited_timestamp))&&value!=='invalid_timestamp'){
+      m.edited_timestamp=renderedTime;diagnostics.nativeRenderedTimeUsed=(diagnostics.nativeRenderedTimeUsed||0)+1;
     }
     const record=archive.records.get(m.id);
     const proven=record&&['event','native','record','bridge'].includes(record.editEvidenceSource)&&Number.isInteger(record.verifiedHistoryStart);
     const prior=before&&before.content!==m.content?before:nativeSeen.get(m.id)||(proven?record.message:null);
+    const priorTime=Math.max(Date.parse(prior?.edited_timestamp)||0,proven?Date.parse(record.message.edited_timestamp)||0:0);
+    const skips=diagnostics.nativeEditChecks||(diagnostics.nativeEditChecks={noBaseline:0,unchanged:0,noTime:0,staleTime:0,alreadySaved:0,filtered:0,captured:0});
+    if(!prior)skips.noBaseline++;
+    else if(prior.content===m.content)skips.unchanged++;
+    else if(!validEditTime(m.edited_timestamp))skips.noTime++;
+    else if(Date.parse(m.edited_timestamp)<=priorTime)skips.staleTime++;
+    else if(record?.message.content===m.content)skips.alreadySaved++;
     // A render can contain an older or timestamp-less record. It must never
     // revoke proof from an actual update; only a server load may do that.
     if(prior&&prior.channel_id===m.channel_id&&prior.content!==m.content&&validEditTime(m.edited_timestamp)
-      &&Date.parse(m.edited_timestamp)>(Date.parse(prior.edited_timestamp)||0)&&record?.message.content!==m.content){
+      &&Date.parse(m.edited_timestamp)>priorTime&&record?.message.content!==m.content){
       // A genuine native edit requires both a changed body and an advancing
       // server edit timestamp. Content-only refreshes are never edits.
       const count=record?.history.length||0;
@@ -638,6 +676,11 @@ function createPlugin(api,definePlugin) {
         changed.message.edited_timestamp=m.edited_timestamp;
         diagnostics.nativeObservedEdits=(diagnostics.nativeObservedEdits||0)+1;
         if(source==='record')diagnostics.nativeRecordEdits=(diagnostics.nativeRecordEdits||0)+1;
+        skips.captured++;nativeRecordBefore.delete(m.id);
+      }else{
+        skips.filtered++;
+        const channel=archive.channel(m.channel_id);
+        diagnostics.nativeEditFilter={channelFound:!!channel,selected:archive.selected===m.channel_id,channelAllowed:!!channel&&archive.policy(channel),authorAllowed:archive.authorAllowed(m.author,{type:'MESSAGE_UPDATE'})};
       }
       effect(out.effects);
     }
@@ -668,7 +711,7 @@ function createPlugin(api,definePlugin) {
           if(isLocalTemporary(message)||isLocalTemporary(live)){markTemporary(message.id);continue;}
           const signature=JSON.stringify(message.content),alreadyPainted=nativePainted.get(message.id)===signature;
           const priorContent=nativeContentSeen.get(message.id);
-          if(live)observeNativeMessage(live,undefined,'bridge');
+          if(live)observeRenderedMessage(live,message,'bridge');
           const r=archive.records.get(message.id);
           // Keep Discord's parsed old content when it matches a confirmed saved
           // version. This preserves mentions/emoji/formatting without reparsing.
@@ -677,7 +720,8 @@ function createPlugin(api,definePlugin) {
             if(saved&&!saved.nativeContent&&saved.message.content===priorContent.body){saved.nativeContent=clone(priorContent.nodes);save();}
           }
           const raw=live&&normalizeMessage(live,message.channelId);
-          if(!alreadyPainted&&typeof raw?.content==='string')nativeContentSeen.set(message.id,{body:raw.content,nodes:clone(message.content)});
+          const plain=message.content.every(n=>n.type==='text'&&typeof n.content==='string')?message.content.map(n=>n.content).join(''):null;
+          if(!alreadyPainted&&typeof raw?.content==='string'&&(plain==null||plain===raw.content))nativeContentSeen.set(message.id,{body:raw.content,nodes:clone(message.content)});
           if(!r||r.localTemporary||!archive.options.inlineEnabled||archive.options.streamMode)continue;
           const edits=verifiedEdits(archive,message.id),deleted=archive.canShowDeleted(r),modifier=archive.modifiers.get(message.id)||{};
           if(edits.length&&!alreadyPainted){
@@ -695,6 +739,7 @@ function createPlugin(api,definePlugin) {
             changed=true;
           }
           if(deleted){message.edited='삭제됨';changed=true;}
+          else if(edits.length&&message.edited!=null){message.edited=null;changed=true;}
           if(edits.length)nativePainted.set(message.id,JSON.stringify(message.content));
         }
         const cap=archive.options.messageCacheCap;
@@ -717,7 +762,13 @@ function createPlugin(api,definePlugin) {
         if(started){
           diagnostics.nativeRecordUpdatesSeen=(diagnostics.nativeRecordUpdatesSeen||0)+1;
           try{
-            if(!args[1]?.__vml_edits?.length&&!args[1]?.__vml_restore_edit&&args[1]?.edited_timestamp!=='invalid_timestamp')
+            const after=normalizeMessage(result);
+            const foreign=args[1]?.__vml_edits?.length||args[1]?.__vml_restore_edit||args[1]?.edited_timestamp==='invalid_timestamp';
+            if(!foreign&&before&&after&&typeof before.content==='string'&&typeof after.content==='string'&&before.id===after.id&&before.channel_id===after.channel_id&&before.content!==after.content&&!isLocalTemporary(result)&&!isLocalTemporary(before)){
+              nativeRecordBefore.set(after.id,{before,after:after.content});
+              while(nativeRecordBefore.size>archive.options.messageCacheCap)nativeRecordBefore.delete(nativeRecordBefore.keys().next().value);
+            }
+            if(!foreign)
               observeNativeMessage(result,before,'record');
           }catch(e){diagnostics.nativeRecordError=String(e.message);}
         }
@@ -731,13 +782,14 @@ function createPlugin(api,definePlugin) {
     unpatches.push(wait((rows,records)=>{
       unpatches.push(api.patcher.instead(rows,'generate',function(args,original){
         const data=args[0],message=data?.message;
-        if(started&&data?.rowType===1)try{diagnostics.nativeRowsGenerated=(diagnostics.nativeRowsGenerated||0)+1;observeNativeMessage(message);}catch(e){diagnostics.nativeObservationError=String(e.message);}
-        const r=archive?.records.get(message?.id);
-        if(!started||data?.rowType!==1||!r||r.localTemporary||isLocalTemporary(message)||!archive.options.inlineEnabled||archive.options.streamMode)return original.apply(this,args);
-        const deleted=archive.canShowDeleted(r),edits=verifiedEdits(archive,message.id),modifier=archive.modifiers.get(message.id)||{};
         const generated=original.apply(this,args);
+        if(started&&data?.rowType===1)try{diagnostics.nativeRowsGenerated=(diagnostics.nativeRowsGenerated||0)+1;observeRenderedMessage(message,generated?.message,'native',true);}catch(e){diagnostics.nativeObservationError=String(e.message);}
+        const r=archive?.records.get(message?.id);
+        if(!started||data?.rowType!==1||!r||r.localTemporary||isLocalTemporary(message)||!archive.options.inlineEnabled||archive.options.streamMode)return generated;
+        const deleted=archive.canShowDeleted(r),edits=verifiedEdits(archive,message.id),modifier=archive.modifiers.get(message.id)||{};
         if(!generated||typeof generated!=='object')return generated;
         const row={...generated,message:generated.message?{...generated.message}:generated.message};
+        let historyApplied=false;
         if(edits.length&&typeof records.createMessageRecord==='function'){
           // Native `edited` is appended once at the very end of a row. For
           // per-version suffixes use Discord's own subtext node inline after
@@ -765,6 +817,7 @@ function createPlugin(api,definePlugin) {
               const versions=edits.map(v=>v.message.content+(modifier.noSuffix?'':' (수정됨)'));
               row.message.content=[...versions,...(modifier.editNum==null?[r.message.content]:[])].join('\n');
             }
+            historyApplied=true;diagnostics.nativeRowsHistoriesShown=(diagnostics.nativeRowsHistoriesShown||0)+1;
           }catch(e){diagnostics.nativeHistory=e.message;}
           finally{original.apply(this,args);}
         }
@@ -796,7 +849,7 @@ function createPlugin(api,definePlugin) {
           row.backgroundHighlight={...row.backgroundHighlight,backgroundColor:process(deleted?'#ed424533':'#949ba422'),gutterColor:process(color)};
         }
         if(row.message){row.message={...row.message,edited:deleted?'삭제됨':edits.length?null:row.message.edited};}
-        if(edits.length&&Array.isArray(row.message?.content))nativePainted.set(message.id,JSON.stringify(row.message.content));
+        if(historyApplied&&Array.isArray(row.message?.content))nativePainted.set(message.id,JSON.stringify(row.message.content));
         return row;
       }));
       diagnostics.nativeRows='RowManager.generate connected';inlineReady=true;notify();
@@ -862,9 +915,10 @@ function createPlugin(api,definePlugin) {
     const toggle=(label,key)=>h(View,{key,style:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',paddingVertical:6}},
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
     const logs=(archive?.logs(query,kind)||[]).filter(r=>!r.localTemporary&&!isLocalTemporary(r.message)&&(kind==='sent'||r.deletedAt||verifiedEdits(archive,r.message.id).length));
-    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.10',status,started,inlineReady,...diagnostics,stats:archive?.stats()},null,2);
+    const proofStats=archive?{verified:[...archive.records.values()].filter(r=>Number.isInteger(r.verifiedHistoryStart)&&r.editEvidenceSource).length,visible:[...archive.records.keys()].filter(id=>verifiedEdits(archive,id).length).length}:undefined;
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.11',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
     const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
-    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.10'),{fontSize:22,fontWeight:'bold'}),
+    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.11'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
       text('실제 화면 호출: updateRows '+(diagnostics.nativeBridgeMessageRows||0)+' · RowManager '+(diagnostics.nativeRowsGenerated||0)+' · 레코드 갱신 '+(diagnostics.nativeRecordUpdatesSeen||0),{color:'#949ba4',fontSize:12}),
       h(View,{style:{flexDirection:'row'}},button('연결 진단 보기',()=>setDiagnosticOpen(true)),button('진단 복사',copyDiagnostic)),
@@ -924,7 +978,7 @@ function createPlugin(api,definePlugin) {
         writeBinary:typeof nativeFile?.writeFile==='function'?async(id,name,data)=>{const path=await nativeFile.writeFile('documents',binaryPath(id,name),data,'base64');return path.startsWith('file://')?path:'file://'+path;}:undefined,
         deleteBinary:typeof nativeFile?.removeFile==='function'?(id,name)=>nativeFile.removeFile('documents',binaryPath(id,name)):undefined,
         onChange:message=>{if(message)status=message;notify();}});
-      await media.start();nativeSeen.clear();temporaryIds.clear();nativeContentSeen.clear();nativePainted.clear();started=true;stopping=false;diagnostics={inline:'not found',prefetch:'not found',nativeRows:'탐색 대기',nativeBridge:'탐색 대기',nativeTextShape:'아직 수집되지 않음',editEventsSeen:0,nativeRowsGenerated:0,nativeRecordUpdatesSeen:0,nativeBridgeCalls:0,nativeBridgeMessageRows:0,nativeBridgeStoreMatches:0,nativeBridgeHistoriesShown:0};status='기록 중 · MLV2 기본 필터 사용';
+      await media.start();nativeSeen.clear();nativeRenderedSeen.clear();nativeRecordBefore.clear();temporaryIds.clear();nativeContentSeen.clear();nativePainted.clear();started=true;stopping=false;diagnostics={inline:'not found',prefetch:'not found',nativeRows:'탐색 대기',nativeBridge:'탐색 대기',flux:api.discord.flux.mode||'adapter',nativeTextShape:'아직 수집되지 않음',editEventsSeen:0,nativeRowsGenerated:0,nativeRecordUpdatesSeen:0,nativeBridgeCalls:0,nativeBridgeMessageRows:0,nativeBridgeStoreMatches:0,nativeBridgeHistoriesShown:0};status='기록 중 · MLV2 기본 필터 사용';
       try {
         patchRecordUpdates();
         patchNativeRows();
@@ -962,8 +1016,13 @@ function createPlugin(api,definePlugin) {
           // Unverified legacy entries are preserved, but may not provide the
           // previous body for a newly confirmed edit.
           if(type==='MESSAGE_UPDATE'&&priorRecord&&(!Number.isInteger(priorRecord.verifiedHistoryStart)||!['event','native','record','bridge'].includes(priorRecord.editEvidenceSource))&&validEditTime(normalized.message?.edited_timestamp)){
-            const live=normalizeMessage(previous(normalized.message.id,normalized.message.channel_id),normalized.message.channel_id);
+            const live=nativeBaseline(normalized.message)||normalizeMessage(previous(normalized.message.id,normalized.message.channel_id),normalized.message.channel_id);
             if(typeof live?.content==='string')priorRecord.message.content=live.content;
+          }
+          if(type==='MESSAGE_UPDATE'&&validEditTime(normalized.message?.edited_timestamp)){
+            const baseline=nativeBaseline(normalized.message);
+            if(baseline&&baseline.content!==normalized.message.content&&archive.records.get(normalized.message.id)?.message.content!==normalized.message.content)
+              archive.cache.set(normalized.message.id,clone(baseline));
           }
           const out=archive.process(normalized);
           if(type==='MESSAGE_UPDATE'&&validEditTime(normalized.message?.edited_timestamp)){
@@ -972,6 +1031,7 @@ function createPlugin(api,definePlugin) {
               if(!Number.isInteger(record.verifiedHistoryStart)||!['event','native','record','bridge'].includes(record.editEvidenceSource))record.verifiedHistoryStart=priorLength;
               record.editEvidence=normalized.message.edited_timestamp;record.editEvidenceSource='event';
               record.message.edited_timestamp=normalized.message.edited_timestamp;
+              nativeRecordBefore.delete(normalized.message.id);
             }
           }
           effect(out.effects);
@@ -1024,17 +1084,27 @@ function createStablePlugin(vd,host=globalThis){
     const list=channelMessages?.get?.(channel)||channelMessages?._channelMessages?.[channel];
     return list?.get?.(id)||list?._map?.[id]||list?._array?.find(m=>m.id===id);
   };
-  const handlers=new Map();let dispatchUndo;
+  const handlers=new Map(),observed=new WeakSet();let dispatchUndo;
   function subscribe(type,cb){
     handlers.set(type,cb);
+    // Discord can call a bound dispatch reference captured before our patch.
+    // Its typed subscriptions still receive that action after the store update.
+    const dispatcher=common.FluxDispatcher;
+    const subscriber=event=>{
+      if(observed.has(event)){observed.delete(event);return;}
+      const handler=handlers.get(type);if(handler)handler(event);
+    };
+    const subscribed=typeof dispatcher.subscribe==='function'&&typeof dispatcher.unsubscribe==='function';
+    if(subscribed)dispatcher.subscribe(type,subscriber);
     if(!dispatchUndo)dispatchUndo=patcher.instead('dispatch',common.FluxDispatcher,function(args,original){
       const event=args[0],handler=handlers.get(event?.type);
       if(!handler)return original.apply(this,args);
       const replacement=handler(event);
       if(replacement===null)return;
+      if(subscribed&&replacement&&typeof replacement==='object')observed.add(replacement);
       return original.apply(this,[replacement,...args.slice(1)]);
     });
-    return()=>{handlers.delete(type);if(!handlers.size){dispatchUndo?.();dispatchUndo=undefined;}};
+    return()=>{if(subscribed)dispatcher.unsubscribe(type,subscriber);handlers.delete(type);if(!handlers.size){dispatchUndo?.();dispatchUndo=undefined;}};
   }
   const finders={filters:{withProps:(...props)=>props},waitForModules(props,callback){
     let canceled=false,timer;
@@ -1077,8 +1147,8 @@ function createStablePlugin(vd,host=globalThis){
     }
     scan();return()=>{canceled=true;clearTimeout(timer);};
   }
-  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.10',react:{React:common.React,ReactNative:common.ReactNative},
-    discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe},common:{flux:{Dispatcher:common.FluxDispatcher}},native:{FileModule:nativeFile,waitForNativeRows,waitForNativeBridge},
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.11',react:{React:common.React,ReactNative:common.ReactNative},
+    discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},native:{FileModule:nativeFile,waitForNativeRows,waitForNativeBridge},
       actions:{ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},
     patcher:{instead:(parent,key,cb)=>patcher.instead(key,parent,cb)},
@@ -1106,15 +1176,26 @@ module.exports={createStablePlugin};
 "./mobile":function(module,exports,require){
 'use strict';
 const {snapshot}=require('./core');
+function editTime(value){
+  if(validEditTime(value))return value;
+  if(!value||typeof value!=='object')return undefined;
+  // MessageRecord date wrappers do not all expose toISOString. Only accept
+  // explicit ISO serializers; do not infer an edit from the body or local time.
+  for(const method of ['toISOString','toISO','toJSON'])try{
+    if(typeof value[method]==='function'){
+      const serialized=value[method]();if(validEditTime(serialized))return serialized;
+    }
+  }catch(_){}
+  return undefined;
+}
 function normalizeMessage(raw,channelId,old,type){
   if(!raw)return null;
   const channel=raw.channel_id||raw.channelId||channelId;
   const out=snapshot(raw,channel);if(!out)return null;
   out.type=raw.type??old?.type??0;
   if(raw.state!==undefined)out.state=raw.state;
-  if(raw.editedTimestamp!=null&&out.edited_timestamp==null){
-    const time=raw.editedTimestamp;out.edited_timestamp=typeof time.toISOString==='function'?time.toISOString():time;
-  }
+  const time=raw.edited_timestamp==='invalid_timestamp'?undefined:editTime(raw.edited_timestamp)||editTime(raw.editedTimestamp);
+  if(time)out.edited_timestamp=time;
   if(out.edited_timestamp!=null&&!validEditTime(out.edited_timestamp))delete out.edited_timestamp;
   // Native aliases are accepted, but missing timestamps are never invented.
   // Content differences also occur in non-edit native refreshes.
@@ -1141,6 +1222,6 @@ function verifiedEdits(archive,id){
   if(!cap||modifier.showAllEdits||all.length<=cap)return all;
   return archive.options.hideNewerEditsFirst?all.slice(0,cap):all.slice(-cap);
 }
-module.exports={normalizeMessage,validEditTime,verifiedEdits,isLocalTemporary};
+module.exports={normalizeMessage,validEditTime,editTime,verifiedEdits,isLocalTemporary};
 
 }};const cache={};function require(id){if(!cache[id]){const m=cache[id]={exports:{}};modules[id](m,m.exports,require);}return cache[id].exports;}return require('./stable').createStablePlugin(vendetta);})()
