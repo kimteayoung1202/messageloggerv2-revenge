@@ -494,7 +494,7 @@ module.exports={Journal,MediaCache,allowedUrl,fetchData};
 "./plugin":function(module,exports,require){
 'use strict';
 const {clone}=require('./core');
-const {normalizeMessage}=require('./mobile');
+const {normalizeMessage,validEditTime,verifiedEdits}=require('./mobile');
 const {Engine}=require('./engine');
 const {createUI}=require('./ui');
 const {Journal,MediaCache,fetchData}=require('./io');
@@ -595,18 +595,36 @@ function createPlugin(api,definePlugin) {
         const data=args[0],message=data?.message;
         const r=archive?.records.get(message?.id);
         if(!started||data?.rowType!==1||!r||!archive.options.inlineEnabled||archive.options.streamMode)return original.apply(this,args);
-        const deleted=archive.canShowDeleted(r),edits=archive.visibleEdits(message.id),modifier=archive.modifiers.get(message.id)||{};
-        let input=data;
+        const deleted=archive.canShowDeleted(r),edits=verifiedEdits(archive,message.id),modifier=archive.modifiers.get(message.id)||{};
+        const generated=original.apply(this,args);
+        if(!generated||typeof generated!=='object')return generated;
+        const row={...generated,message:generated.message?{...generated.message}:generated.message};
         if(edits.length&&typeof records.createMessageRecord==='function'){
-          // RowManager serializes native text; build a temporary display record.
-          // Persisted raw content and MessageStore contents retain their normal values.
+          // Parse each version independently so code blocks/quotes cannot consume
+          // the next version or the small label. Never change store records.
           const raw=normalizeMessage(message,r.message.channel_id,r.message);
-          const versions=edits.map(v=>v.message.content+(modifier.noSuffix?'':' (수정됨)'));
-          raw.content=[...versions,...(modifier.editNum==null?[r.message.content]:[])].join('\n');
-          try{input={...data,message:records.createMessageRecord(raw,message.reactions)};}catch(e){diagnostics.nativeHistory=e.message;}
+          const renderContent=content=>{
+            const display=records.createMessageRecord({...raw,content},message.reactions);
+            return original.apply(this,[{...data,message:display},...args.slice(1)])?.message?.content;
+          };
+          try{
+            if(Array.isArray(row.message?.content)){
+              const parts=[],separator=renderContent('\n');
+              const append=value=>{if(!Array.isArray(value))throw Error('native content array required');parts.push(...value);};
+              for(const version of edits){
+                append(renderContent(version.message.content));
+                if(!modifier.noSuffix){append(separator);append(renderContent('-# (수정됨)'));}
+                append(separator);
+              }
+              if(modifier.editNum==null)append(row.message.content);
+              row.message.content=parts;
+            }else{
+              const versions=edits.map(v=>v.message.content+(modifier.noSuffix?'':'\n-# (수정됨)'));
+              row.message.content=[...versions,...(modifier.editNum==null?[r.message.content]:[])].join('\n');
+            }
+          }catch(e){diagnostics.nativeHistory=e.message;}
+          finally{original.apply(this,args);}
         }
-        const row=original.apply(this,[input,...args.slice(1)]);
-        if(!row||typeof row!=='object')return row;
         if(typeof diagnostics.nativeTextShape!=='object'){
           let remaining=500;
           const seen=new WeakSet();
@@ -656,13 +674,14 @@ function createPlugin(api,definePlugin) {
         if(!started||!archive.options.inlineEnabled||archive.options.streamMode)return result;
         const message=args[0]?.message;if(!message?.id)return result;
         const r=archive.records.get(message.id);if(!r||!(r.deletedAt||r.history.length))return result;
+        if(!archive.canShowDeleted(r)&&!verifiedEdits(archive,message.id).length)return result;
         try {
           const shown=archive.canShowDeleted(r);const modifier=archive.modifiers.get(message.id)||{};
           const painted=shown&&!archive.noTint.has(message.id)?(archive.options.useAlternativeDeletedStyle?React.createElement(RN.View,{style:{backgroundColor:'#ed424533'}},result):typeof r.message.content==='string'&&r.message.content.length?React.createElement(RN.Text,{style:{color:archive.options.deletedMessageColor,fontSize:16}},r.message.content):colorText(result,archive.options.deletedMessageColor)):result;
           const children=modifier.editNum==null?[painted]:[];
           if(shown)children.unshift(React.createElement(RN.Text,{key:'deleted',style:{color:'#ed4245',fontSize:11}},'삭제된 메시지'));
-          for(const version of archive.visibleEdits(message.id))children.push(React.createElement(RN.Text,{key:'edit-'+version.index,style:{color:archive.options.editedMessageColor,fontSize:13,opacity:0.7}},version.message.content+(modifier.noSuffix?'':' (수정됨)')));
-          if(archive.visibleEdits(message.id).length<r.history.length&&!r.editsHidden&&archive.options.showEditedMessages)children.push(React.createElement(RN.Pressable,{key:'all',onPress:()=>{archive.modifiers.set(message.id,{showAllEdits:true});refreshChat(message.id);}},React.createElement(RN.Text,{style:{color:'#949ba4'}},'수정 이력 모두 보기')));
+          for(const version of verifiedEdits(archive,message.id))children.push(React.createElement(RN.Text,{key:'edit-'+version.index,style:{color:archive.options.editedMessageColor,opacity:0.7}},version.message.content,modifier.noSuffix?null:React.createElement(RN.Text,{style:{color:'#949ba4',fontSize:11,opacity:1}},' (수정됨)')));
+          if(verifiedEdits(archive,message.id).length<Math.max(0,r.history.length-(r.verifiedHistoryStart??r.history.length))&&!r.editsHidden&&archive.options.showEditedMessages)children.push(React.createElement(RN.Pressable,{key:'all',onPress:()=>{archive.modifiers.set(message.id,{showAllEdits:true});refreshChat(message.id);}},React.createElement(RN.Text,{style:{color:'#949ba4'}},'수정 이력 모두 보기')));
           return React.createElement(RN.View,null,...children);
         }catch(_){return result;}
       });
@@ -697,10 +716,10 @@ function createPlugin(api,definePlugin) {
     const button=(name,fn)=>h(Pressable,{key:name,onPress:fn,style:{padding:10,backgroundColor:'#404249',borderRadius:7,margin:3}},text(name));
     const toggle=(label,key)=>h(View,{key,style:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',paddingVertical:6}},
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
-    const logs=archive?.logs(query,kind)||[];
-    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.5',status,started,inlineReady,...diagnostics},null,2);
+    const logs=(archive?.logs(query,kind)||[]).filter(r=>kind==='sent'||r.deletedAt||verifiedEdits(archive,r.message.id).length);
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.6',status,started,inlineReady,...diagnostics},null,2);
     const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
-    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.5'),{fontSize:22,fontWeight:'bold'}),
+    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.6'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
       text('채팅 표시: '+(inlineReady?(diagnostics.nativeRows?'네이티브 RowManager 연결됨':'React MessageContent 연결됨'):'이 Discord 빌드의 렌더러를 찾지 못함 — 기록 화면에서 확인'),{color:'#949ba4',fontSize:12}),
       h(View,{style:{flexDirection:'row'}},button('연결 진단 보기',()=>setDiagnosticOpen(true)),button('진단 복사',copyDiagnostic)),
@@ -724,7 +743,7 @@ function createPlugin(api,definePlugin) {
         text((r.deletedAt?(r.bulk?'일괄 삭제':'삭제됨'):r.history.length?'수정됨':'메시지')+(r.ghostPing?' · 고스트 핑':''),{color:r.deletedAt?'#ed4245':'#949ba4',fontWeight:'bold'}),
         text(r.message.author?.global_name||r.message.author?.username||r.message.author?.id||'알 수 없음',{fontWeight:'bold',marginTop:4}),
         text('채널 '+r.message.channel_id+' · '+new Date(r.deletedAt||r.seenAt).toLocaleString(),{color:'#949ba4',fontSize:11}),
-        ...r.history.map((version,i)=>h(Pressable,{key:i,onLongPress:()=>setAction({record:r,editNum:i}),style:{marginTop:8,borderLeftWidth:2,borderLeftColor:'#949ba4',paddingLeft:8}},
+        ...verifiedEdits(archive,r.message.id).map((version)=>h(Pressable,{key:version.index,onLongPress:()=>setAction({record:r,editNum:version.index}),style:{marginTop:8,borderLeftWidth:2,borderLeftColor:'#949ba4',paddingLeft:8}},
           text('수정됨 · '+new Date(version.at).toLocaleString(),{color:'#949ba4',fontSize:11}),
           text(version.message.content||'(텍스트 없음)',{color:'#949ba4',opacity:0.7}))),
         text(r.message.content||'(텍스트 없음)',{color:r.deletedAt?'#ed4245':'#f2f3f5',marginTop:8}),
@@ -765,7 +784,39 @@ function createPlugin(api,definePlugin) {
         for(const type of ['MESSAGE_CREATE','MESSAGE_UPDATE','MESSAGE_DELETE','MESSAGE_DELETE_BULK','LOAD_MESSAGES_SUCCESS','CHANNEL_SELECT','CONNECTION_OPEN','MESSAGE_LOGGER_V2_SELF_TEST'])on(type,e=>{
           if(type==='MESSAGE_UPDATE')diagnostics.editEventsSeen++;
           const normalized=e.message?{...e,message:rawMessage(e)}:e;
-          const out=archive.process(normalized);effect(out.effects);
+          const priorRecord=archive.records.get(normalized.message?.id);
+          const priorLength=priorRecord?.history.length||0;
+          if(type==='MESSAGE_UPDATE'&&(e.__vml_restore_edit||e.message?.__vml_edits?.length||e.message?.edited_timestamp==='invalid_timestamp')){
+            diagnostics.externalLoggerUpdatesIgnored=(diagnostics.externalLoggerUpdatesIgnored||0)+1;
+            return e;
+          }
+          if(type==='LOAD_MESSAGES_SUCCESS')for(const raw of e.messages||[]){
+            const record=archive.records.get(raw.id);if(!record?.history.length)continue;
+            const loaded=normalizeMessage(raw,e.channelId||e.channel_id);
+            if(!loaded||!('edited_timestamp' in raw||'editedTimestamp' in raw))continue;
+            if(validEditTime(loaded.edited_timestamp)&&loaded.content===record.message.content){
+              record.verifiedHistoryStart??=0;record.editEvidence=loaded.edited_timestamp;
+            }else if(!validEditTime(loaded.edited_timestamp)){
+              delete record.verifiedHistoryStart;delete record.editEvidence;
+            }
+            save();
+          }
+          // Unverified legacy entries are preserved, but may not provide the
+          // previous body for a newly confirmed edit.
+          if(type==='MESSAGE_UPDATE'&&priorRecord&&!Number.isInteger(priorRecord.verifiedHistoryStart)&&validEditTime(normalized.message?.edited_timestamp)){
+            const live=normalizeMessage(previous(normalized.message.id,normalized.message.channel_id),normalized.message.channel_id);
+            if(typeof live?.content==='string')priorRecord.message.content=live.content;
+          }
+          const out=archive.process(normalized);
+          if(type==='MESSAGE_UPDATE'&&validEditTime(normalized.message?.edited_timestamp)){
+            const record=archive.records.get(normalized.message.id);
+            if(record&&record.history.length>priorLength){
+              if(!Number.isInteger(record.verifiedHistoryStart))record.verifiedHistoryStart=priorLength;
+              record.editEvidence=normalized.message.edited_timestamp;
+              record.message.edited_timestamp=normalized.message.edited_timestamp;
+            }
+          }
+          effect(out.effects);
           if(out.event===null&&type!=='MESSAGE_LOGGER_V2_SELF_TEST'&&(!inlineReady||!archive.options.inlineEnabled||archive.options.streamMode))return e;
           if(out.event===null&&type!=='MESSAGE_LOGGER_V2_SELF_TEST')Promise.resolve().then(()=>{if(started)for(const id of (type==='MESSAGE_DELETE_BULK'?e.ids:[e.id]))refreshChat(id);});
           if(type==='LOAD_MESSAGES_SUCCESS'&&out.event?.messages)out.event={...out.event,messages:out.event.messages.map(m=>archive.records.has(m.id)?localAttachments(m):m)};
@@ -848,7 +899,7 @@ function createStablePlugin(vd,host=globalThis){
     }
     scan();return()=>{canceled=true;clearTimeout(timer);};
   }
-  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.4',react:{React:common.React,ReactNative:common.ReactNative},
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.6',react:{React:common.React,ReactNative:common.ReactNative},
     discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe},common:{flux:{Dispatcher:common.FluxDispatcher}},native:{FileModule:nativeFile,waitForNativeRows},
       actions:{ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},
@@ -886,10 +937,25 @@ function normalizeMessage(raw,channelId,old,type){
   if(raw.editedTimestamp!=null&&out.edited_timestamp==null){
     const time=raw.editedTimestamp;out.edited_timestamp=typeof time.toISOString==='function'?time.toISOString():time;
   }
+  if(out.edited_timestamp!=null&&!validEditTime(out.edited_timestamp))delete out.edited_timestamp;
   // Native aliases are accepted, but missing timestamps are never invented.
   // Content differences also occur in non-edit native refreshes.
   return out;
 }
-module.exports={normalizeMessage};
+function validEditTime(value){
+  return typeof value==='string'&&/^\d{4}-\d{2}-\d{2}T/.test(value)&&Number.isFinite(Date.parse(value));
+}
+function verifiedEdits(archive,id){
+  const r=archive.records.get(id);
+  if(!r||!Number.isInteger(r.verifiedHistoryStart))return [];
+  if(r.editsHidden||!archive.options.showEditedMessages||archive.options.streamMode)return [];
+  const modifier=archive.modifiers.get(id)||{};
+  const all=r.history.map((v,index)=>({...v,index})).filter(v=>v.index>=r.verifiedHistoryStart);
+  if(modifier.editNum!=null)return all.filter(v=>v.index===modifier.editNum);
+  const cap=archive.options.maxShownEdits;
+  if(!cap||modifier.showAllEdits||all.length<=cap)return all;
+  return archive.options.hideNewerEditsFirst?all.slice(0,cap):all.slice(-cap);
+}
+module.exports={normalizeMessage,validEditTime,verifiedEdits};
 
 }};const cache={};function require(id){if(!cache[id]){const m=cache[id]={exports:{}};modules[id](m,m.exports,require);}return cache[id].exports;}return require('./stable').createStablePlugin(vendetta);})()
