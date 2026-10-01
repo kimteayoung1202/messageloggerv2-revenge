@@ -607,6 +607,16 @@ function createPlugin(api,definePlugin) {
         }
         const row=original.apply(this,[input,...args.slice(1)]);
         if(!row||typeof row!=='object')return row;
+        if(!diagnostics.nativeTextShape){
+          const shape=(value,depth=0)=>{
+            if(value==null)return String(value);
+            if(Array.isArray(value))return value.length?[shape(value[0],depth+1)]:'empty array';
+            if(typeof value!=='object')return typeof value;
+            if(depth>=3)return 'object';
+            const out={};for(const key of Object.keys(value).slice(0,35))out[key]=shape(value[key],depth+1);return out;
+          };
+          diagnostics.nativeTextShape=shape(row.message);notify();
+        }
         const color=deleted?archive.options.deletedMessageColor:archive.options.editedMessageColor;
         const process=RN.processColor||((value)=>value);
         if((deleted&&!archive.noTint.has(message.id))||edits.length){
@@ -639,7 +649,7 @@ function createPlugin(api,definePlugin) {
           const painted=shown&&!archive.noTint.has(message.id)?(archive.options.useAlternativeDeletedStyle?React.createElement(RN.View,{style:{backgroundColor:'#ed424533'}},result):typeof r.message.content==='string'&&r.message.content.length?React.createElement(RN.Text,{style:{color:archive.options.deletedMessageColor,fontSize:16}},r.message.content):colorText(result,archive.options.deletedMessageColor)):result;
           const children=modifier.editNum==null?[painted]:[];
           if(shown)children.unshift(React.createElement(RN.Text,{key:'deleted',style:{color:'#ed4245',fontSize:11}},'삭제된 메시지'));
-          for(const version of archive.visibleEdits(message.id))children.push(React.createElement(RN.Text,{key:'edit-'+version.index,style:{color:archive.options.editedMessageColor,fontSize:13}},version.message.content+(modifier.noSuffix?'':' (수정됨)')));
+          for(const version of archive.visibleEdits(message.id))children.push(React.createElement(RN.Text,{key:'edit-'+version.index,style:{color:archive.options.editedMessageColor,fontSize:13,opacity:0.7}},version.message.content+(modifier.noSuffix?'':' (수정됨)')));
           if(archive.visibleEdits(message.id).length<r.history.length&&!r.editsHidden&&archive.options.showEditedMessages)children.push(React.createElement(RN.Pressable,{key:'all',onPress:()=>{archive.modifiers.set(message.id,{showAllEdits:true});refreshChat(message.id);}},React.createElement(RN.Text,{style:{color:'#949ba4'}},'수정 이력 모두 보기')));
           return React.createElement(RN.View,null,...children);
         }catch(_){return result;}
@@ -701,7 +711,7 @@ function createPlugin(api,definePlugin) {
         text('채널 '+r.message.channel_id+' · '+new Date(r.deletedAt||r.seenAt).toLocaleString(),{color:'#949ba4',fontSize:11}),
         ...r.history.map((version,i)=>h(Pressable,{key:i,onLongPress:()=>setAction({record:r,editNum:i}),style:{marginTop:8,borderLeftWidth:2,borderLeftColor:'#949ba4',paddingLeft:8}},
           text('수정됨 · '+new Date(version.at).toLocaleString(),{color:'#949ba4',fontSize:11}),
-          text(version.message.content||'(텍스트 없음)',{color:'#949ba4'}))),
+          text(version.message.content||'(텍스트 없음)',{color:'#949ba4',opacity:0.7}))),
         text(r.message.content||'(텍스트 없음)',{color:r.deletedAt?'#ed4245':'#f2f3f5',marginTop:8}),
         ...(r.message.attachments||[]).map((a,i)=>h(Attachment,{key:a.id||i,attachment:a})),
         ...(r.message.embeds||[]).map((e,i)=>text([e.title,e.description,e.url].filter(Boolean).join('\n'),{color:'#b5bac1',marginTop:6}))) });
