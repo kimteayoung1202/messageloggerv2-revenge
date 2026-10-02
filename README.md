@@ -1,6 +1,6 @@
-# Revenge All-in-One 0.5.2 — Revenge 1.11.6
+# Revenge All-in-One 0.5.3 — Revenge 1.11.6
 
-0.5.2: 기기 진단에서 숨김 채널 행 렌더러는 연결됐지만 ChannelListStore 이름 탐색이 실패하여 목록 처리 호출이 0회인 상태를 확인했습니다. 저장소 이름 외에 getGuild / getGuildWithoutChangingGuildActionRows의 고유 메서드 조합으로도 목록 저장소를 찾도록 수정했습니다. 렌더러 연결 뒤 저장소가 늦게 초기화되어도 독립적으로 다시 탐색하고 목록을 갱신합니다. 플러그인을 끄면 탐색 타이머와 연결 패치를 해제합니다. 동일 조건의 테스트는 0.5.1에서 실패하고 수정 후 통과합니다. 자동 테스트 232개 통과. 기존 기록 경로와 로거 오류 격리는 유지합니다. 실제 Android에서의 숨김 채널 표시는 아직 검증하지 못했습니다. 업데이트 후 서버 채널 목록을 열고 진단의 hiddenChannelList가 ChannelListStore connected인지, hiddenChannelStats.guildListCalls가 증가하는지 확인할 수 있습니다.
+0.5.3: 0.5.2 기기 진단에서도 목록 저장소 탐색과 호출이 실패하여, 저장소 외에 ChannelListState의 getGuild / getGuildChannelRowsOnly에 직접 연결하는 경로를 추가했습니다. 늦게 초기화되는 모듈을 독립적으로 탐색하며 중복 목록 처리와 종료 후 패치 잔존을 방지합니다. 진단에 stateListCalls, rendererCalls, rendererSizeCalls와 입력 구조를 추가했습니다. 로거 기록 경로는 유지합니다. 자동 테스트 234개 통과. 실제 Android의 숨김 채널 표시는 아직 검증하지 못했습니다. 업데이트 후 앱을 다시 시작하고 서버 채널 목록을 열어 hiddenChannelList의 ChannelListState connected, hiddenChannelStats.stateListCalls 및 hiddenRowsRendered를 확인해 주세요.
 
 0.5.1: 숨김 채널 렌더러 탐색을 실제 Vendetta 호환 API인 findByProps로 수정했습니다. Revenge 1.11.6의 Metro 내부에는 findByFilePath가 있지만 플러그인에 제공하는 vendetta.metro에는 없어 0.5.0의 렌더러 연결이 계속 탐색 중에 머물렀습니다. 숨김 채널 갱신 오류가 메시지로거 시작을 중단할 수 있는 경로도 수정했습니다. 로거를 먼저 연결하고 선택 기능의 오류와 알림 리스너의 오류를 격리하며, 채널 목록은 관련 설정이 바뀔 때 갱신합니다. 두 재현 테스트가 기존 코드에서 실패하고 수정 후 통과합니다. 자동 테스트 230개 통과. 진단의 loggerEvents는 실제 메시지 이벤트 수를, hiddenChannelStats는 목록 호출 수·캐시된 숨김 채널 수·표시 모델의 숨김 행 수·실제 렌더 호출 수와 모델의 키 구조를 보여줍니다. 실제 Android 실행과 사용자 기기의 정확한 오류는 검증하지 못했습니다.
 
