@@ -807,6 +807,12 @@ function createChannelTools(api,getEngine,save,subscribe,status){
   const button=(s,fn)=>h(RN.Pressable,{key:s,onPress:fn,style:{padding:10,backgroundColor:'#404249',borderRadius:7,margin:3}},text(s));
   const options=()=>getEngine()?.options||{};
   const config=()=>shcSettings(options().shc);
+  function resolveChannel(channelId,record){
+    const fallback=record?.id===channelId?record:null;
+    let live;try{live=stores.ChannelStore?.getChannel?.(channelId);}catch(_){}
+    const channel=live||fallback,name=live?.name||fallback?.name||'이름 정보 없음';
+    return {channel,name};
+  }
   const change=(key,value)=>{const engine=getEngine();if(engine){engine.options.shc={...config(),[key]:value};save();}};
   function useUpdates(){const [,update]=React.useState(0);React.useEffect(()=>{
     const cb=()=>update(n=>n+1),cleanup=[subscribe(cb)];
@@ -866,8 +872,8 @@ function createChannelTools(api,getEngine,save,subscribe,status){
           text(item.id,{fontSize:11,color:'#949ba4'}))}),
       channelId?h(Detail,{channelId,onClose:()=>setChannel('')}):null));
   }
-  function Detail({channelId,onClose}){useUpdates();const [roleId,setRole]=React.useState('');
-    const channel=stores.ChannelStore?.getChannel?.(channelId);
+  function Detail({channelId,channelRecord,onClose}){useUpdates();const [roleId,setRole]=React.useState('');
+    const {channel,name}=resolveChannel(channelId,channelRecord);
     if(!channel)return h(RN.Modal,{visible:true,onRequestClose:onClose},h(RN.View,{style:{padding:20,backgroundColor:'#313338',flex:1}},button('닫기',onClose),text('채널 정보가 더 이상 없습니다.')));
     const guild=stores.GuildStore?.getGuild?.(channel.guild_id),parent=stores.ChannelStore?.getChannel?.(channel.parent_id??channel.parentId),access=channelAccess(api,channel);
     const roles=rolesForGuild(api,channel.guild_id),role=roles.find(r=>r.id===roleId),roleBits=role?flagBits(role.permissions):null;
@@ -876,7 +882,7 @@ function createChannelTools(api,getEngine,save,subscribe,status){
     const badge=value=>value===true?'허용':value===false?'거부':'확인 불가';
     const color=value=>value===true?'#57f287':value===false?'#ed4245':'#949ba4';
     return h(RN.Modal,{visible:true,onRequestClose:onClose},h(RN.ScrollView,{contentContainerStyle:{padding:20,backgroundColor:'#313338',flexGrow:1}},
-      button('닫기',onClose),text((access===false?'🔒 ':'')+'#'+(channel.name||'이름 정보 없음'),{fontSize:22,fontWeight:'bold'}),
+      button('닫기',onClose),text((access===false?'🔒 ':'')+'#'+name,{fontSize:22,fontWeight:'bold'}),
       text(guild?.name||channel.guild_id||'서버 정보 없음',{color:'#b5bac1',marginTop:8}),
       text('채널 ID: '+channel.id+'\n카테고리: '+(parent?.name||parent?.id||'없음')+'\n유형: '+channel.type,{color:'#949ba4',marginTop:8,selectable:true}),
       text('주제: '+(channel.topic||'정보 없음'),{marginTop:10,selectable:true}),
@@ -907,15 +913,15 @@ function createChannelTools(api,getEngine,save,subscribe,status){
             allow&&deny?text(PERMISSIONS.filter(([,bit])=>allow.has(bit)||deny.has(bit)).map(([,bit,label])=>label+': '+(allow.has(bit)?'허용':'거부')).join('\n')||'모두 기본값 (중립)',{marginTop:8}):text('권한 데이터 확인 불가',{color:'#949ba4'}));
         })):null));
   }
-  function HiddenRow({channelId}){useUpdates();const [open,setOpen]=React.useState(false),channel=stores.ChannelStore?.getChannel?.(channelId);
+  function HiddenRow({channelId,channelRecord}){useUpdates();const [open,setOpen]=React.useState(false),{channel,name}=resolveChannel(channelId,channelRecord);
     if(!getEngine()||!isHidden(api,channel)||!displayEnabled(options(),channel))return null;
     const icon=config().hiddenChannelIcon==='eye'?'👁':config().hiddenChannelIcon==='false'?'':'🔒';
     const typeIcon=({0:'#',2:'🔊',5:'📢',6:'▣',13:'◉',15:'▤',16:'▧'})[channel.type]||'#';
-    return h(RN.View,null,h(RN.Pressable,{onPress:()=>setOpen(true),onLongPress:()=>setOpen(true),accessibilityLabel:'숨겨진 채널 '+(channel.name||channel.id),style:{minHeight:44,paddingHorizontal:20,paddingVertical:10,flexDirection:'row',alignItems:'center'}},
-      text(typeIcon,{color:'#949ba4',fontSize:18,marginRight:8}),text(channel.name||'이름 정보 없음',{color:'#949ba4',fontSize:16,flex:1}),text(icon,{fontSize:15,color:'#949ba4'})),
-      open?h(Detail,{channelId,onClose:()=>setOpen(false)}):null);
+    return h(RN.View,null,h(RN.Pressable,{onPress:()=>setOpen(true),onLongPress:()=>setOpen(true),accessibilityLabel:'숨겨진 채널 '+name,style:{minHeight:44,paddingHorizontal:20,paddingVertical:10,flexDirection:'row',alignItems:'center'}},
+      text(typeIcon,{color:'#949ba4',fontSize:18,marginRight:8}),h(RN.Text,{numberOfLines:1,ellipsizeMode:'tail',style:{color:'#b5bac1',fontSize:16,flexGrow:1,flexShrink:1,minWidth:0}},name),text(icon,{fontSize:15,color:'#949ba4'})),
+      open?h(Detail,{channelId,channelRecord:channelRecord||channel,onClose:()=>setOpen(false)}):null);
   }
-  function connect(){return createNativeSHC(api,()=>options(),subscribe,channel=>h(HiddenRow,{channelId:channel.id}),(message,stats)=>{status().hiddenChannelList=message;status().hiddenChannelStats=stats;});
+  function connect(){return createNativeSHC(api,()=>options(),subscribe,channel=>h(HiddenRow,{channelId:channel.id,channelRecord:channel}),(message,stats)=>{status().hiddenChannelList=message;status().hiddenChannelStats=stats;});
   }
   return {HiddenSettings,OtherSettings,Browser,Detail,HiddenRow,GuildSettings,connect};
 }
@@ -1390,9 +1396,9 @@ function createPlugin(api,definePlugin) {
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
     const logs=sortArchiveRows((archive?.logs(query,kind)||[]).filter(r=>!r.localTemporary&&!isLocalTemporary(r.message)&&(kind==='sent'||r.deletedAt||verifiedEdits(archive,r.message.id).length)),archive?.options.oldestActivityFirst===true);
     const proofStats=archive?{verified:[...archive.records.values()].filter(r=>Number.isInteger(r.verifiedHistoryStart)&&r.editEvidenceSource).length,visible:[...archive.records.keys()].filter(id=>verifiedEdits(archive,id).length).length}:undefined;
-    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.5.3',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.5.4',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
     const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
-    const header=h(View,null,text('Revenge All-in-One v'+(api.pluginVersion||'0.5.3'),{fontSize:22,fontWeight:'bold'}),
+    const header=h(View,null,text('Revenge All-in-One v'+(api.pluginVersion||'0.5.4'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
       UI?h(UI.Options):null,
       channelTools?h(channelTools.HiddenSettings):null,
@@ -1688,7 +1694,7 @@ function createStablePlugin(vd,host=globalThis){
     }
     scan();return()=>{canceled=true;clearTimeout(timer);undo?.();};
   }
-  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.5.3',react:{React:common.React,ReactNative:common.ReactNative},
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.5.4',react:{React:common.React,ReactNative:common.ReactNative},
     discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},permissions:{get constants(){try{return common.constants?.Permissions||{};}catch(_){return {};}}},native:{FileModule:nativeFile,waitForNativeRows,waitForNativeBridge,waitForHiddenChannelStore,waitForHiddenChannelState,waitForHiddenChannelRenderer,get createChannelRecord(){return vd.metro.findByProps('createChannelRecord')?.createChannelRecord;}},
       actions:{jumpToMessage,ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},
