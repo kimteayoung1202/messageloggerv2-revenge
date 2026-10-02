@@ -1,3 +1,17 @@
+# Hidden Channels Fix 모바일 이식 — 0.5.5
+
+기준: [cloudburst / Training Dummy 원본](https://github.com/trainingdummy/vendetta-plugins/tree/c473c13c1a5d7983d1fb45bda15fd19b14c21ead/plugins/hidden-channels), CC0 1.0.
+
+원본의 표시용 VIEW_CHANNEL override, transitionToGuild/fetchMessages 차단, 기본 채널 행과 ChannelMessages 숨김 안내 화면을 Revenge 1.11.6에 맞게 연결합니다. 원본의 orig(args) 호출은 this와 원래 인자를 보존하도록 고쳤고, realCheck 임시 레코드 변경은 별도 실제 판정 함수로 바꿨습니다. 표시 판정이 CONNECT 등 다른 권한으로 전파되지 않도록 중첩 실제 판정도 보존합니다. 권한 뷰어는 표시용 override를 읽지 않습니다.
+
+기본 행이 이름과 아이콘을 그립니다. 모든 서버에서 받은 숨김 채널을 원래 위치에 표시하고, 별도 읽지 않음 억제를 적용하지 않습니다. 기존 커스텀 행과 BD 옵션은 원본 모듈이 아직 발견되지 않을 때만 호환 경로로 사용합니다. All-in-One 기능 스위치·스트리머 모드·로거·권한 뷰어는 유지합니다. 숨김 안내 화면에는 원본의 주제/생성/마지막 메시지/핀 정보가 포함되며, 원본의 moment 상대 시각, 날짜 누르기 토스트, 길게 눌러 타임스탬프 복사도 연결합니다. moment가 없는 경우 절대 시각으로 대체합니다.
+
+검증: 242개 자동 테스트. 네이티브 이름/아이콘 renderer 반환값, 실제 권한과 중첩 판정, 숨김 요청 차단, 일반 함수 호출, 늦은 연결, off/streamer/unload 캐시 재생성, 로거 저장을 모의 검증했습니다. 실제 Android 347012 화면의 기본 잠금 아이콘·굵기·미읽음 스타일 및 전체 UI 동등성은 검증하지 못했습니다.
+
+---
+
+이하 내용은 0.5.0–0.5.4 호환 경로의 기존 범위입니다.
+
 # ShowHiddenChannels 모바일 구현 범위
 
 기준: [JustOptimize/ShowHiddenChannels 6.12](https://github.com/JustOptimize/ShowHiddenChannels/tree/0426b6bc815491d1d1b0bd3475563ee3b32cea58), 특히 src/index.js, SettingsPanel.jsx, Lockscreen.jsx와 접근 역할 컴포넌트. 독립 구현이며 원본 소스는 배포물에 포함하지 않습니다.

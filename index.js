@@ -514,8 +514,78 @@ async function fetchData(url,limit,signal) {
 module.exports={Journal,MediaCache,allowedUrl,fetchData};
 
 },
+"./hiddenfix":function(module,exports,require){
+'use strict';
+// Adapted from cloudburst / Training Dummy's CC0 Hidden Channels Fix.
+// Source: trainingdummy/vendetta-plugins c473c13, plugins/hidden-channels/src/index.ts.
+// Original native rows supply channel names/icons. Keep real checks separate
+// from the client display override and preserve original function signatures.
+function createHiddenChannelsFix(api,getOptions,renderLocked,onChange,onStatus){
+  const permissions=api.discord.permissions||(api.discord.permissions={}),undo=[],patched=new WeakMap();
+  const stats={permissions:false,router:false,fetcher:false,messages:false,nativeRows:0,blockedFetches:0,blockedTransitions:0,lockedScreens:0};
+  let active=true,rawCan,rawParent,realDepth=0;
+  const previousRealCan=permissions.realCan;
+  const enabled=()=>active&&getOptions()?.showHiddenChannels&&!getOptions()?.streamMode;
+  const ready=()=>!!rawCan&&stats.router&&stats.fetcher;
+  function resolve(value){
+    if(value&&typeof value==='object'&&value.id&&typeof value.type==='number')return value;
+    const id=typeof value==='string'?value:value?.channelId||value?.channel_id;
+    return id?api.discord.flux.Stores.ChannelStore?.getChannel?.(id):undefined;
+  }
+  function realCan(flag,channel){realDepth++;try{return rawCan?rawCan.call(rawParent,flag,channel):previousRealCan?.(flag,channel);}finally{realDepth--;}}
+  function hidden(value){const channel=resolve(value),flag=permissions.constants?.VIEW_CHANNEL;
+    if(!channel||typeof channel.type!=='number'||[1,3,4].includes(channel.type)||flag==null)return false;
+    const store=api.discord.flux.Stores.PermissionStore;
+    return (rawCan?realCan(flag,channel):store?.can?.(flag,channel))===false;
+  }
+  function report(){onStatus(ready()?'Hidden Channels Fix connected':'Hidden Channels Fix 모듈 탐색 중',stats);}
+  function patch(parent,key,callback){
+    if(!parent||typeof parent[key]!=='function')return false;
+    let keys=patched.get(parent);if(!keys)patched.set(parent,keys=new Set());
+    if(!keys.has(key)){const unpatch=api.patcher.instead(parent,key,callback);keys.add(key);undo.push(unpatch);}return true;
+  }
+  const wait=api.discord.native?.waitForHiddenChannelsFix;
+  if(typeof wait==='function')undo.push(wait(modules=>{
+    if(!active)return true;const wasReady=ready();
+    if(patch(modules.router,'transitionToGuild',function(args,original){
+      const target=args[1]??args[0];if(enabled()&&hidden(target)){stats.blockedTransitions++;return;}
+      return original.apply(this,args);
+    }))stats.router=true;
+    if(patch(modules.fetcher,'fetchMessages',function(args,original){
+      if(enabled()&&hidden(args[0])){stats.blockedFetches++;return Promise.resolve();}
+      return original.apply(this,args);
+    }))stats.fetcher=true;
+    if(stats.router&&stats.fetcher&&!rawCan&&typeof modules.permissions?.can==='function'){
+      rawParent=modules.permissions;rawCan=rawParent.can;
+      try{
+        patch(rawParent,'can',function(args,original){
+          let result;realDepth++;try{result=original.apply(this,args);}finally{realDepth--;}
+          const channel=resolve(args[1]),flag=permissions.constants?.VIEW_CHANNEL;
+          if(!realDepth&&enabled()&&args[0]===flag&&flag!=null&&channel?.guild_id&&![1,3].includes(channel.type))return true;
+          return result;
+        });
+        permissions.realCan=realCan;stats.permissions=true;
+      }catch(e){rawCan=undefined;rawParent=undefined;throw e;}
+    }
+    if(patch(modules.messages,modules.messagesKey||'default',function(args,original){
+      const channel=args[0]?.channel;if(enabled()&&hidden(channel)){stats.lockedScreens++;return renderLocked(resolve(channel));}
+      return original.apply(this,args);
+    }))stats.messages=true;
+    report();if(!wasReady&&ready())onChange();
+    return stats.permissions&&stats.router&&stats.fetcher&&stats.messages;
+  }));
+  else report();
+  return {ready,enabled,hidden,stats,stop(){
+    active=false;for(const fn of undo.reverse())try{fn?.();}catch(_){}
+    if(permissions.realCan===realCan){if(previousRealCan===undefined)delete permissions.realCan;else permissions.realCan=previousRealCan;}
+  }};
+}
+module.exports={createHiddenChannelsFix};
+
+},
 "./shc":function(module,exports,require){
 'use strict';
+const {createHiddenChannelsFix}=require('./hiddenfix');
 // Independently implemented mobile display adapter for JustOptimize/ShowHiddenChannels 6.12.
 // Changes only cloned channel-list models; real VIEW_CHANNEL/CONNECT checks stay intact.
 const TYPES={0:'GUILD_TEXT',2:'GUILD_VOICE',5:'GUILD_ANNOUNCEMENT',6:'GUILD_STORE',13:'GUILD_STAGE_VOICE',15:'GUILD_FORUM',16:'GUILD_MEDIA'};
@@ -529,9 +599,14 @@ function shcSettings(value={}){
 }
 function isHidden(api,channel){
   if(!channel||typeof channel.type!=='number'||[1,3].includes(channel.type)||['browse','customize','guide'].includes(channel.id))return false;
-  try{const store=api.discord.flux.Stores.PermissionStore,flag=api.discord.permissions?.constants?.VIEW_CHANNEL;
-    return flag!=null&&typeof store?.can==='function'&&store.can(flag,channel)===false;
+  try{const flag=api.discord.permissions?.constants?.VIEW_CHANNEL;
+    return flag!=null&&readPermission(api,flag,channel)===false;
   }catch(_){return false;}
+}
+function readPermission(api,flag,channel){
+  const permissions=api.discord.permissions,store=api.discord.flux.Stores.PermissionStore;
+  if(typeof permissions?.realCan==='function')return permissions.realCan(flag,channel);
+  return typeof store?.can==='function'?store.can(flag,channel):undefined;
 }
 function displayEnabled(options,channel){const cfg=shcSettings(options.shc);return options.showHiddenChannels&&!options.streamMode&&!cfg.blacklistedGuilds[channel?.guild_id]&&!!cfg.channels[TYPES[channel?.type]];}
 const copy=source=>Object.assign(Object.create(Object.getPrototypeOf(source)),source);
@@ -594,18 +669,22 @@ function decorateGuild(api,result,options){
   guild.version=(Number(source.version)||0)+1;
   return result?.guildChannels?{...result,guildChannels:guild,guildChannelsVersion:guild.version}:guild;
 }
-function createNativeSHC(api,getOptions,subscribe,renderHidden,onStatus){
-  const stores=api.discord.flux.Stores,undo=[],cache=new WeakMap(),views=new WeakSet();let active=true;
+function createNativeSHC(api,getOptions,subscribe,renderHidden,onStatus,renderLocked=renderHidden){
+  const stores=api.discord.flux.Stores,undo=[],cache=new WeakMap(),views=new WeakSet(),stateOwners=new Set();let active=true;
   const stats={guildListCalls:0,stateListCalls:0,rendererCalls:0,rendererSizeCalls:0,hiddenRowsInModel:0,hiddenRowsRendered:0,cachedHiddenChannels:0};
   const report=message=>onStatus(message,stats);
   const recordError=e=>{stats.lastError=String(e?.message||e);};
-  function options(){return getOptions()||{};}
+  let fix,fixStatus='';
+  function options(){const opts=getOptions()||{};
+    return fix?.ready()?{...opts,shc:{sort:'native',MarkUnread:true,channels:Object.fromEntries(Object.values(TYPES).map(name=>[name,true])),blacklistedGuilds:{}}}:opts;
+  }
   const shown=c=>active&&isHidden(api,c)&&displayEnabled(options(),c);
   let settingsSignature;
   function refresh(force=false){
     try{
       const next=JSON.stringify([options().showHiddenChannels,options().streamMode,options().shc]);
       if(!force&&next===settingsSignature)return;settingsSignature=next;cacheClear++;
+      for(const state of stateOwners)try{state.clear?.();}catch(e){recordError(e);}
       if(active)connectStores();stores.ChannelListStore?.emitChange?.();
     }catch(e){recordError(e);}
   }
@@ -618,7 +697,7 @@ function createNativeSHC(api,getOptions,subscribe,renderHidden,onStatus){
     return original.apply(this,args);
   }));
   let listConnected=false,stateConnected=false,rendererStatus='채널 목록 탐색 중 · 설정 목록 사용 가능';const patched=new WeakMap();
-  const reportConnection=()=>report((listConnected?'ChannelListStore connected · ':'')+(stateConnected?'ChannelListState connected · ':'')+(!listConnected&&!stateConnected?'ChannelListStore/State 탐색 중 · ':'')+rendererStatus);
+  const reportConnection=()=>report((fixStatus?fixStatus+' · ':'')+(listConnected?'ChannelListStore connected · ':'')+(stateConnected?'ChannelListState connected · ':'')+(!listConnected&&!stateConnected?'ChannelListStore/State 탐색 중 · ':'')+rendererStatus);
   function patchOnce(parent,key,callback){try{if(!parent||typeof parent[key]!=='function')return false;
     let keys=patched.get(parent);if(!keys)patched.set(parent,keys=new Set());if(!keys.has(key)){const unpatch=api.patcher.instead(parent,key,callback);keys.add(key);undo.push(unpatch);}return true;
     }catch(e){recordError(e);return false;}
@@ -649,7 +728,7 @@ function createNativeSHC(api,getOptions,subscribe,renderHidden,onStatus){
   let read;try{read=stores.ReadStateStore;}catch(e){recordError(e);}
   for(const key of ['getGuildChannelUnreadState','getMentionCount','getUnreadCount','hasTrackedUnread','hasUnread','hasUnreadPins'])patchOnce(read,key,function(args,original){
     const channel=stores.ChannelStore?.getChannel?.(typeof args[0]==='object'?args[0]?.id:args[0]);
-    if(shown(channel)&&!shcSettings(options().shc).MarkUnread)return key==='getGuildChannelUnreadState'?{mentionCount:0,unread:false}:key.startsWith('get')?0:false;
+    if(!fix?.ready()&&shown(channel)&&!shcSettings(options().shc).MarkUnread)return key==='getGuildChannelUnreadState'?{mentionCount:0,unread:false}:key.startsWith('get')?0:false;
     return original.apply(this,args);
   });
   }
@@ -660,17 +739,20 @@ function createNativeSHC(api,getOptions,subscribe,renderHidden,onStatus){
   if(typeof waitState==='function')undo.push(waitState(parent=>{
     if(!active)return true;
     for(const key of ['getGuild','getGuildChannelRowsOnly'])if(patchOnce(parent,key,function(args,original){
+      stateOwners.add(this);
       stats.stateListCalls++;return decorateResult(original.apply(this,args),args[0]);
     }))stateConnected=true;
     if(!stateConnected)return false;refresh(true);reportConnection();return true;
   }));
   const find=api.modules?.finders;
-  if(find?.waitForModules)undo.push(find.waitForModules(find.filters.withProps('fetchMessages','deleteMessage'),actions=>{
+  if(find?.waitForModules&&typeof api.discord.native?.waitForHiddenChannelsFix!=='function')undo.push(find.waitForModules(find.filters.withProps('fetchMessages','deleteMessage'),actions=>{
     if(!active)return;undo.push(api.patcher.instead(actions,'fetchMessages',function(args,original){
       const id=args[0]?.channelId||args[0]?.channel_id||args[0],channel=stores.ChannelStore?.getChannel?.(id);
       if(active&&options().showHiddenChannels&&isHidden(api,channel))return Promise.resolve();return original.apply(this,args);
     }));
   }));
+  fix=createHiddenChannelsFix(api,getOptions,renderLocked,()=>refresh(true),(message,info)=>{fixStatus=message;stats.hiddenChannelsFix=info;reportConnection();});
+  undo.push(()=>fix.stop());
   const wait=api.discord.native?.waitForHiddenChannelRenderer;
   if(typeof wait==='function')undo.push(wait((parent,key,rowHeight)=>{
     connectStores();refresh(true);
@@ -679,11 +761,13 @@ function createNativeSHC(api,getOptions,subscribe,renderHidden,onStatus){
       stats.rendererCalls++;
       const props=args[0];stats.rendererPropsShape={type:typeof props,keys:props&&typeof props==='object'?Object.keys(props).slice(0,30):[],guildChannels:typeof props?.guildChannels,section:typeof props?.section,row:typeof props?.row};
       const model=props?.guildChannels;stats.renderedModelShape={getChannelFromSectionRow:typeof model?.getChannelFromSectionRow,categories:typeof model?.categories,noParentCategory:typeof model?.noParentCategory};
-      const channel=channelAt(args[0]);if(shown(channel)){stats.hiddenRowsRendered++;return renderHidden(channel);}return original.apply(this,args);
+      const channel=channelAt(args[0]);if(shown(channel)){stats.hiddenRowsRendered++;
+        if(fix.ready()){fix.stats.nativeRows++;return original.apply(this,args);}return renderHidden(channel);
+      }return original.apply(this,args);
     })];
     if(typeof rowHeight==='function'&&typeof parent.getChannelListItemSize==='function')cleanup.push(api.patcher.instead(parent,'getChannelListItemSize',function(args,original){
       stats.rendererSizeCalls++;
-      if(shown(channelAt(args[0])))return rowHeight(args[0].fontScale);return original.apply(this,args);
+      if(!fix.ready()&&shown(channelAt(args[0])))return rowHeight(args[0].fontScale);return original.apply(this,args);
     }));
     return()=>{for(const fn of cleanup.reverse())fn();};
   },message=>{rendererStatus=message;reportConnection();}));
@@ -691,13 +775,13 @@ function createNativeSHC(api,getOptions,subscribe,renderHidden,onStatus){
   undo.push(subscribe(()=>refresh(false)));refresh(true);
   return()=>{active=false;for(const fn of undo.reverse())try{fn?.();}catch(e){recordError(e);}refresh(true);};
 }
-module.exports={TYPES,DEFAULTS,shcSettings,isHidden,displayEnabled,hiddenCategoryRecord,decorateGuild,createNativeSHC};
+module.exports={TYPES,DEFAULTS,shcSettings,isHidden,readPermission,displayEnabled,hiddenCategoryRecord,decorateGuild,createNativeSHC};
 
 },
 "./channels":function(module,exports,require){
 'use strict';
-// Read-only channel metadata. PermissionStore.can is never patched.
-const {TYPES,shcSettings,isHidden,displayEnabled,createNativeSHC}=require('./shc');
+// Permission viewer uses real checks even while native display checks are overridden.
+const {TYPES,shcSettings,isHidden,readPermission,displayEnabled,createNativeSHC}=require('./shc');
 const PERMISSIONS=[
   ['CREATE_INSTANT_INVITE',0,'초대 만들기'],['KICK_MEMBERS',1,'멤버 추방'],['BAN_MEMBERS',2,'멤버 차단'],['ADMINISTRATOR',3,'관리자'],
   ['MANAGE_CHANNELS',4,'채널 관리'],['MANAGE_GUILD',5,'서버 관리'],['ADD_REACTIONS',6,'반응 추가'],['VIEW_AUDIT_LOG',7,'감사 로그 보기'],
@@ -731,8 +815,8 @@ function channelAccess(api,channel){
   if(!channel)return null;if(channel.type===1||channel.type===3)return true;
   const permission=api.discord.permissions?.constants?.VIEW_CHANNEL;
   const store=api.discord.flux.Stores.PermissionStore;
-  if(permission==null||typeof store?.can!=='function')return null;
-  try{const allowed=store.can(permission,channel);return typeof allowed==='boolean'?allowed:null;}catch(_){return null;}
+  if(permission==null)return null;
+  try{const allowed=readPermission(api,permission,channel);return typeof allowed==='boolean'?allowed:null;}catch(_){return null;}
 }
 function guildChannels(api,guildId){
   if(!guildId)return [];
@@ -750,7 +834,7 @@ function permissionRows(api,channel){
   const store=api.discord.flux.Stores.PermissionStore,constants=api.discord.permissions?.constants||{};
   return PERMISSIONS.map(([name,bit,label])=>{
     let allowed=null;const flag=constants[name];
-    if(flag!=null&&typeof store?.can==='function')try{const result=store.can(flag,channel);if(typeof result==='boolean')allowed=result;}catch(_){}
+    if(flag!=null)try{const result=readPermission(api,flag,channel);if(typeof result==='boolean')allowed=result;}catch(_){}
     return {name,bit,label,allowed};
   });
 }
@@ -784,11 +868,12 @@ function accessLists(api,channel,cfg){
   const members=list.filter(o=>String(o.type)==='1').map(o=>({id:o.id,user:api.discord.flux.Stores.UserStore?.getUser?.(o.id),allowed:memberViewAccess(api,channel,o.id)}));
   return {channelRoles,adminRoles,members};
 }
-function snowflakeDate(id){
+function snowflakeTime(id){
   if(!/^\d{16,22}$/.test(String(id||'')))return null;let carry=0,quotient='';
   for(const digit of String(id)){const n=carry*10+Number(digit);quotient+=Math.floor(n/4194304);carry=n%4194304;}
-  const date=new Date(Number(quotient)+1420070400000);return Number.isFinite(date.getTime())?date.toLocaleString():null;
+  const date=new Date(Number(quotient)+1420070400000);return Number.isFinite(date.getTime())?date:null;
 }
+function snowflakeDate(id){return snowflakeTime(id)?.toLocaleString()||null;}
 function metadataLines(channel){
   const lines=[],slow=channel.rateLimitPerUser??channel.rate_limit_per_user,emoji=channel.iconEmoji??channel.icon_emoji;
   if(emoji)lines.push('아이콘: '+(emoji.name||emoji.id));
@@ -828,6 +913,10 @@ function createChannelTools(api,getEngine,save,subscribe,status){
   const section=(title,open,setOpen,children)=>h(RN.View,{style:{borderTopWidth:1,borderTopColor:'#4e5058',paddingVertical:12}},button(title+(open?' 접기':' 펼치기'),()=>setOpen(!open)),open?children:null);
   function selectedGuild(){return stores.SelectedGuildStore?.getGuildId?.()||stores.ChannelStore?.getChannel?.(stores.SelectedChannelStore?.getChannelId?.())?.guild_id;}
   function HiddenSettings(){useUpdates();const [open,setOpen]=React.useState(false),[browse,setBrowse]=React.useState(false),[guildSettings,setGuildSettings]=React.useState(false);
+    const fix=status().hiddenChannelStats?.hiddenChannelsFix;
+    if(fix?.permissions&&fix.router&&fix.fetcher)return section('ShowHiddenChannels 설정',open,setOpen,h(RN.View,null,
+      toggle('숨겨진 채널 표시','showHiddenChannels'),text('Hidden Channels Fix · 원래 위치와 Discord 기본 채널 행을 사용합니다.',{color:'#b5bac1',marginVertical:8}),
+      text(status().hiddenChannelList||'연결 확인 중',{fontSize:11,color:'#949ba4'})));
     return section('ShowHiddenChannels 설정',open,setOpen,h(RN.View,null,
       toggle('숨겨진 채널 표시','showHiddenChannels'),
       choices('숨김 표시 아이콘','hiddenChannelIcon',[['lock','잠금'],['eye','눈'],['false','없음']]),
@@ -921,9 +1010,25 @@ function createChannelTools(api,getEngine,save,subscribe,status){
       text(typeIcon,{color:'#949ba4',fontSize:18,marginRight:8}),h(RN.Text,{numberOfLines:1,ellipsizeMode:'tail',style:{color:'#b5bac1',fontSize:16,flexGrow:1,flexShrink:1,minWidth:0}},name),text(icon,{fontSize:15,color:'#949ba4'})),
       open?h(Detail,{channelId,channelRecord:channelRecord||channel,onClose:()=>setOpen(false)}):null);
   }
-  function connect(){return createNativeSHC(api,()=>options(),subscribe,channel=>h(HiddenRow,{channelId:channel.id,channelRecord:channel}),(message,stats)=>{status().hiddenChannelList=message;status().hiddenChannelStats=stats;});
+  function FancyDate({date}){
+    if(!date||!Number.isFinite(date.getTime()))return text('Unknown.');
+    const moment=api.discord.native?.moment,stamp=typeof moment==='function'?moment(date):null;
+    const toast=content=>api.discord.actions?.ToastActionCreators?.open?.({content});
+    return h(RN.Pressable,{style:{height:16,alignSelf:'baseline'},onPress:()=>toast(stamp?.toLocaleString?.()||date.toLocaleString()),onLongPress:()=>{
+      api.clipboard?.setString?.(String(date.getTime()));toast('Copied to clipboard');
+    }},text(stamp?.fromNow?.()||date.toLocaleString(),{fontSize:16}));
   }
-  return {HiddenSettings,OtherSettings,Browser,Detail,HiddenRow,GuildSettings,connect};
+  function LockedChannel({channelRecord}){useUpdates();const {channel}=resolveChannel(channelRecord?.id,channelRecord);
+    if(!channel)return null;
+    return h(RN.View,{style:{flex:1,padding:16,justifyContent:'center'}},
+      text('This channel is hidden.',{fontSize:24,fontWeight:'600',paddingVertical:25}),
+      h(RN.Text,{style:{fontSize:16,color:'#f2f3f5'}},'Topic: '+(channel.topic||'No topic.'),'\n\nCreation date: ',h(FancyDate,{date:snowflakeTime(channel.id)}),
+        '\n\nLast message: ',(channel.lastMessageId??channel.last_message_id)?h(FancyDate,{date:snowflakeTime(channel.lastMessageId??channel.last_message_id)}):'No messages.',
+        '\n\nLast pin: ',channel.lastPinTimestamp?h(FancyDate,{date:new Date(channel.lastPinTimestamp)}):'No pins.'));
+  }
+  function connect(){return createNativeSHC(api,()=>options(),subscribe,channel=>h(HiddenRow,{channelId:channel.id,channelRecord:channel}),(message,stats)=>{status().hiddenChannelList=message;status().hiddenChannelStats=stats;},channel=>h(LockedChannel,{channelRecord:channel}));
+  }
+  return {HiddenSettings,OtherSettings,Browser,Detail,HiddenRow,LockedChannel,FancyDate,GuildSettings,connect};
 }
 module.exports={createChannelTools,flagBits,channelAccess,guildChannels,hiddenChannels,permissionRows,overwrites,rolesForGuild,memberViewAccess,accessLists,metadataLines,snowflakeDate,PERMISSIONS};
 
@@ -1396,9 +1501,9 @@ function createPlugin(api,definePlugin) {
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
     const logs=sortArchiveRows((archive?.logs(query,kind)||[]).filter(r=>!r.localTemporary&&!isLocalTemporary(r.message)&&(kind==='sent'||r.deletedAt||verifiedEdits(archive,r.message.id).length)),archive?.options.oldestActivityFirst===true);
     const proofStats=archive?{verified:[...archive.records.values()].filter(r=>Number.isInteger(r.verifiedHistoryStart)&&r.editEvidenceSource).length,visible:[...archive.records.keys()].filter(id=>verifiedEdits(archive,id).length).length}:undefined;
-    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.5.4',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.5.5',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
     const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
-    const header=h(View,null,text('Revenge All-in-One v'+(api.pluginVersion||'0.5.4'),{fontSize:22,fontWeight:'bold'}),
+    const header=h(View,null,text('Revenge All-in-One v'+(api.pluginVersion||'0.5.5'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
       UI?h(UI.Options):null,
       channelTools?h(channelTools.HiddenSettings):null,
@@ -1694,8 +1799,21 @@ function createStablePlugin(vd,host=globalThis){
     }
     scan();return()=>{canceled=true;clearTimeout(timer);undo?.();};
   }
-  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.5.4',react:{React:common.React,ReactNative:common.ReactNative},
-    discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},permissions:{get constants(){try{return common.constants?.Permissions||{};}catch(_){return {};}}},native:{FileModule:nativeFile,waitForNativeRows,waitForNativeBridge,waitForHiddenChannelStore,waitForHiddenChannelState,waitForHiddenChannelRenderer,get createChannelRecord(){return vd.metro.findByProps('createChannelRecord')?.createChannelRecord;}},
+  function waitForHiddenChannelsFix(callback){
+    let canceled=false,timer,scans=0;
+    function scan(){if(canceled)return;try{
+      const named=vd.metro.findByName?.('ChannelMessages',false)||vd.metro.findByProps('ChannelMessages');
+      const messages=typeof named?.default==='function'||typeof named?.ChannelMessages==='function'?named:undefined;
+      const modules={permissions:vd.metro.findByProps('getChannelPermissions','can')||stores.PermissionStore,
+        router:vd.metro.findByProps('transitionToGuild'),fetcher:vd.metro.findByProps('stores','fetchMessages')||vd.metro.findByProps('fetchMessages','deleteMessage'),messages,messagesKey:typeof messages?.default==='function'?'default':'ChannelMessages'};
+      if(callback(modules)!==false)return;
+    }catch(_){}
+      timer=setTimeout(scan,++scans<30?1000:30000);
+    }
+    scan();return()=>{canceled=true;clearTimeout(timer);};
+  }
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.5.5',react:{React:common.React,ReactNative:common.ReactNative},
+    discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},permissions:{get constants(){try{return common.constants?.Permissions||{};}catch(_){return {};}}},native:{FileModule:nativeFile,moment:common.moment,waitForNativeRows,waitForNativeBridge,waitForHiddenChannelStore,waitForHiddenChannelState,waitForHiddenChannelRenderer,waitForHiddenChannelsFix,get createChannelRecord(){return vd.metro.findByProps('createChannelRecord')?.createChannelRecord;}},
       actions:{jumpToMessage,ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},
     patcher:{instead:(parent,key,cb)=>patcher.instead(key,parent,cb)},
