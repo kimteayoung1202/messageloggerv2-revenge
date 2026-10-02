@@ -1046,12 +1046,20 @@ function createChannelTools(api,getEngine,save,subscribe,status){
       Promise.resolve(channelConnection.viewAnyway(channel)).catch(e=>RN.Alert?.alert?.('채널 이동 실패',String(e?.message||e)));
     }catch(e){RN.Alert?.alert?.('채널 이동 실패',String(e?.message||e));}
   }
+  function nativeLock(){
+    let icon;try{icon=api.discord.native?.getNativeLockIcon?.();}catch(_){}
+    status().hiddenChannelLockIcon=icon?.name||'네이티브 아이콘 탐색 중';
+    const style={width:24,height:24,marginRight:8};
+    if(icon?.Component)return h(icon.Component,{width:24,height:24,size:24,color:'#949ba4',style,accessible:false});
+    if(typeof icon?.source==='number'&&RN.Image)return h(RN.Image,{source:icon.source,resizeMode:'contain',style:{...style,tintColor:'#949ba4'},accessible:false});
+    return h(RN.View,{style,accessible:false});
+  }
   function HiddenRow({channelId,channelRecord}){useUpdates();const [open,setOpen]=React.useState(false),{channel,name}=resolveChannel(channelId,channelRecord);
     if(!getEngine()||!isHidden(api,channel)||!options().showHiddenChannels||options().streamMode)return null;
     const showInfo=()=>{if(typeof RN.Alert?.alert!=='function'){setOpen(true);return;}
-      RN.Alert.alert('🔒 '+name,hiddenInfo(channel,name),[{text:'닫기',style:'cancel'},{text:'상세 정보',onPress:()=>setOpen(true)},{text:'View anyway',onPress:()=>viewAnyway(channel)}]);};
+      RN.Alert.alert(name,hiddenInfo(channel,name),[{text:'닫기',style:'cancel'},{text:'상세 정보',onPress:()=>setOpen(true)},{text:'View anyway',onPress:()=>viewAnyway(channel)}]);};
     return h(RN.View,null,h(RN.Pressable,{onPress:showInfo,onLongPress:showInfo,accessibilityRole:'button',accessibilityLabel:'숨겨진 채널 '+name,style:{minHeight:44,paddingHorizontal:20,paddingVertical:10,flexDirection:'row',alignItems:'center'}},
-      text('🔒',{color:'#949ba4',fontSize:22,marginRight:8}),h(RN.Text,{numberOfLines:1,ellipsizeMode:'tail',style:{color:'#b5bac1',fontSize:16,fontWeight:'bold',flexGrow:1,flexShrink:1,minWidth:0}},name)),
+      nativeLock(),h(RN.Text,{numberOfLines:1,ellipsizeMode:'tail',style:{color:'#b5bac1',fontSize:16,fontWeight:'bold',flexGrow:1,flexShrink:1,minWidth:0}},name)),
       open?h(Detail,{channelId,channelRecord:channelRecord||channel,onClose:()=>setOpen(false)}):null);
   }
   function FancyDate({date}){
@@ -1545,9 +1553,9 @@ function createPlugin(api,definePlugin) {
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
     const logs=sortArchiveRows((archive?.logs(query,kind)||[]).filter(r=>!r.localTemporary&&!isLocalTemporary(r.message)&&(kind==='sent'||r.deletedAt||verifiedEdits(archive,r.message.id).length)),archive?.options.oldestActivityFirst===true);
     const proofStats=archive?{verified:[...archive.records.values()].filter(r=>Number.isInteger(r.verifiedHistoryStart)&&r.editEvidenceSource).length,visible:[...archive.records.keys()].filter(id=>verifiedEdits(archive,id).length).length}:undefined;
-    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.5.7',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.5.8',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
     const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
-    const header=h(View,null,text('Revenge All-in-One v'+(api.pluginVersion||'0.5.7'),{fontSize:22,fontWeight:'bold'}),
+    const header=h(View,null,text('Revenge All-in-One v'+(api.pluginVersion||'0.5.8'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
       UI?h(UI.Options):null,
       channelTools?h(channelTools.HiddenSettings):null,
@@ -1856,8 +1864,22 @@ function createStablePlugin(vd,host=globalThis){
     }
     scan();return()=>{canceled=true;clearTimeout(timer);};
   }
-  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.5.7',react:{React:common.React,ReactNative:common.ReactNative},
-    discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},permissions:{get constants(){try{return common.constants?.Permissions||{};}catch(_){return {};}}},native:{FileModule:nativeFile,moment:common.moment,waitForNativeRows,waitForNativeBridge,waitForHiddenChannelStore,waitForHiddenChannelState,waitForHiddenChannelRenderer,waitForHiddenChannelsFix,get createChannelRecord(){return vd.metro.findByProps('createChannelRecord')?.createChannelRecord;}},
+  let nativeLockIcon;
+  function getNativeLockIcon(){
+    if(nativeLockIcon)return nativeLockIcon;
+    try{
+      const named=vd.metro.findByProps('LockIcon')?.LockIcon||vd.metro.findByName?.('LockIcon',false);
+      const Component=named?.default||named;
+      if(typeof Component==='function'||Component&&typeof Component==='object'&&Component.$$typeof)return nativeLockIcon={Component,name:'LockIcon'};
+    }catch(_){}
+    for(const name of ['ic_lock_24px','LockIcon','ic_channel_voice_locked'])try{
+      const source=vd.ui.assets?.getAssetIDByName?.(name);
+      if(typeof source==='number'&&Number.isFinite(source))return nativeLockIcon={source,name};
+    }catch(_){}
+    // Do not cache a miss: assets may load when the sidebar is first opened.
+  }
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.5.8',react:{React:common.React,ReactNative:common.ReactNative},
+    discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},permissions:{get constants(){try{return common.constants?.Permissions||{};}catch(_){return {};}}},native:{FileModule:nativeFile,moment:common.moment,getNativeLockIcon,waitForNativeRows,waitForNativeBridge,waitForHiddenChannelStore,waitForHiddenChannelState,waitForHiddenChannelRenderer,waitForHiddenChannelsFix,get createChannelRecord(){return vd.metro.findByProps('createChannelRecord')?.createChannelRecord;}},
       actions:{jumpToMessage,ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},
     patcher:{instead:(parent,key,cb)=>patcher.instead(key,parent,cb)},
