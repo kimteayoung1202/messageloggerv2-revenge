@@ -1,4 +1,6 @@
-# Revenge All-in-One 0.5.3 — Revenge 1.11.6
+# Revenge All-in-One 0.5.4 — Revenge 1.11.6
+
+0.5.4: 숨김 채널 행에 목록에서 받은 ChannelRecord를 직접 전달하여 ID 재조회가 없거나 이름이 비어 있어도 받은 채널명을 표시합니다. 최신 저장소에 이름이 있으면 이름 변경도 반영합니다. 행 이름은 한 줄로 표시하고 긴 이름은 말줄임하며, 상세 화면에도 같은 이름 정보를 전달합니다. 메시지로거와 0.5.3의 목록 연결 경로를 유지합니다. 자동 테스트 235개 통과. 사용자가 0.5.3에서 숨김 채널이 나타나는 것을 확인했으며, 이번 이름 표시 수정의 Android 화면 결과는 아직 검증하지 못했습니다.
 
 0.5.3: 0.5.2 기기 진단에서도 목록 저장소 탐색과 호출이 실패하여, 저장소 외에 ChannelListState의 getGuild / getGuildChannelRowsOnly에 직접 연결하는 경로를 추가했습니다. 늦게 초기화되는 모듈을 독립적으로 탐색하며 중복 목록 처리와 종료 후 패치 잔존을 방지합니다. 진단에 stateListCalls, rendererCalls, rendererSizeCalls와 입력 구조를 추가했습니다. 로거 기록 경로는 유지합니다. 자동 테스트 234개 통과. 실제 Android의 숨김 채널 표시는 아직 검증하지 못했습니다. 업데이트 후 앱을 다시 시작하고 서버 채널 목록을 열어 hiddenChannelList의 ChannelListState connected, hiddenChannelStats.stateListCalls 및 hiddenRowsRendered를 확인해 주세요.
 
