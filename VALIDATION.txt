@@ -1,3 +1,4 @@
+0.5.7: Big lock-only hidden rows at native positions. Tap opens metadata alert with details and View anyway. Explicit button invokes original Revenge router for the selected channel; hidden message fetch and locked-screen guards remain active. Real permission checks, ordinary row/tail/height and logger capture/persistence remain tested. Added alert metadata/lock UI and explicit navigation lifecycle regressions. 245 tests pass; Android visuals and navigation pending.
 0.5.6: The full settings row owns touch and accessibility switch state; native Switch is a pointer-events-free visual with explicit on/off text. Regression checks toggle the original native display mode off/on without invoking a native switch event. 243 automated tests passed. Android touch remains pending device verification.
 Version: 0.5.5
 Independent upstream behavior comparisons: 129 passed

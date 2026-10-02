@@ -523,7 +523,7 @@ module.exports={Journal,MediaCache,allowedUrl,fetchData};
 function createHiddenChannelsFix(api,getOptions,renderLocked,onChange,onStatus){
   const permissions=api.discord.permissions||(api.discord.permissions={}),undo=[],patched=new WeakMap();
   const stats={permissions:false,router:false,fetcher:false,messages:false,nativeRows:0,blockedFetches:0,blockedTransitions:0,lockedScreens:0};
-  let active=true,rawCan,rawParent,realDepth=0;
+  let active=true,rawCan,rawParent,routerParent,routeOriginal,realDepth=0;
   const previousRealCan=permissions.realCan;
   const enabled=()=>active&&getOptions()?.showHiddenChannels&&!getOptions()?.streamMode;
   const ready=()=>!!rawCan&&stats.router&&stats.fetcher;
@@ -547,10 +547,13 @@ function createHiddenChannelsFix(api,getOptions,renderLocked,onChange,onStatus){
   const wait=api.discord.native?.waitForHiddenChannelsFix;
   if(typeof wait==='function')undo.push(wait(modules=>{
     if(!active)return true;const wasReady=ready();
+    if(!stats.router&&typeof modules.router?.transitionToGuild==='function'){routerParent=modules.router;routeOriginal=routerParent.transitionToGuild;}
     if(patch(modules.router,'transitionToGuild',function(args,original){
       const target=args[1]??args[0];if(enabled()&&hidden(target)){stats.blockedTransitions++;return;}
       return original.apply(this,args);
-    }))stats.router=true;
+    })){
+      stats.router=true;
+    }
     if(patch(modules.fetcher,'fetchMessages',function(args,original){
       if(enabled()&&hidden(args[0])){stats.blockedFetches++;return Promise.resolve();}
       return original.apply(this,args);
@@ -575,7 +578,12 @@ function createHiddenChannelsFix(api,getOptions,renderLocked,onChange,onStatus){
     return stats.permissions&&stats.router&&stats.fetcher&&stats.messages;
   }));
   else report();
-  return {ready,enabled,hidden,stats,stop(){
+  return {ready,enabled,hidden,stats,viewAnyway(value){
+    const channel=resolve(value);
+    if(!enabled()||!ready()||!channel?.guild_id||!hidden(channel)||typeof routeOriginal!=='function')throw Error('숨김 채널 이동 기능이 아직 연결되지 않았습니다.');
+    // Only this explicit user action opens the route. Keep fetch/message guards.
+    return routeOriginal.call(routerParent,channel.guild_id,channel.id);
+  },stop(){
     active=false;for(const fn of undo.reverse())try{fn?.();}catch(_){}
     if(permissions.realCan===realCan){if(previousRealCan===undefined)delete permissions.realCan;else permissions.realCan=previousRealCan;}
   }};
@@ -762,18 +770,20 @@ function createNativeSHC(api,getOptions,subscribe,renderHidden,onStatus,renderLo
       const props=args[0];stats.rendererPropsShape={type:typeof props,keys:props&&typeof props==='object'?Object.keys(props).slice(0,30):[],guildChannels:typeof props?.guildChannels,section:typeof props?.section,row:typeof props?.row};
       const model=props?.guildChannels;stats.renderedModelShape={getChannelFromSectionRow:typeof model?.getChannelFromSectionRow,categories:typeof model?.categories,noParentCategory:typeof model?.noParentCategory};
       const channel=channelAt(args[0]);if(shown(channel)){stats.hiddenRowsRendered++;
-        if(fix.ready()){fix.stats.nativeRows++;return original.apply(this,args);}return renderHidden(channel);
+        stats.interactiveHiddenRows=(stats.interactiveHiddenRows||0)+1;return renderHidden(channel);
       }return original.apply(this,args);
     })];
     if(typeof rowHeight==='function'&&typeof parent.getChannelListItemSize==='function')cleanup.push(api.patcher.instead(parent,'getChannelListItemSize',function(args,original){
       stats.rendererSizeCalls++;
-      if(!fix.ready()&&shown(channelAt(args[0])))return rowHeight(args[0].fontScale);return original.apply(this,args);
+      if(shown(channelAt(args[0])))return rowHeight(args[0].fontScale);return original.apply(this,args);
     }));
     return()=>{for(const fn of cleanup.reverse())fn();};
   },message=>{rendererStatus=message;reportConnection();}));
   else {rendererStatus='채널 렌더러 없음 · 설정 목록 사용 가능';reportConnection();}
   undo.push(subscribe(()=>refresh(false)));refresh(true);
-  return()=>{active=false;for(const fn of undo.reverse())try{fn?.();}catch(e){recordError(e);}refresh(true);};
+  const stop=()=>{active=false;for(const fn of undo.reverse())try{fn?.();}catch(e){recordError(e);}refresh(true);};
+  stop.viewAnyway=channel=>fix.viewAnyway(channel);
+  return stop;
 }
 module.exports={TYPES,DEFAULTS,shcSettings,isHidden,readPermission,displayEnabled,hiddenCategoryRecord,decorateGuild,createNativeSHC};
 
@@ -883,6 +893,11 @@ function metadataLines(channel){
   if(channel.bitrate&&channel.type===2)lines.push('비트레이트: '+channel.bitrate/1000+' kbps');
   const created=snowflakeDate(channel.id),last=snowflakeDate(channel.lastMessageId??channel.last_message_id);
   if(created)lines.push('생성 시각: '+created);if(last)lines.push('최근 메시지 시각: '+last);
+  const pin=channel.lastPinTimestamp??channel.last_pin_timestamp;
+  if(pin){const date=new Date(pin);if(Number.isFinite(date.getTime()))lines.push('최근 핀 시각: '+date.toLocaleString());}
+  for(const [label,camel,snake] of [['음성 인원 제한','userLimit','user_limit'],['음성 지역','rtcRegion','rtc_region'],['기본 스레드 보관 시간 (분)','defaultAutoArchiveDuration','default_auto_archive_duration'],['스레드 슬로 모드 (초)','defaultThreadRateLimitPerUser','default_thread_rate_limit_per_user'],['스레드 메시지 수','messageCount','message_count'],['스레드 멤버 수','memberCount','member_count']]){
+    const value=channel[camel]??channel[snake];if(value!=null)lines.push(label+': '+value);
+  }
   if(channel.type===15){const tags=values(channel.availableTags??channel.available_tags);lines.push('포럼 태그: '+(tags.map(t=>t.name).filter(Boolean).join(' · ')||'없음'));if(channel.topic)lines.push('포럼 가이드라인: '+channel.topic);}
   return lines;
 }
@@ -892,6 +907,7 @@ function createChannelTools(api,getEngine,save,subscribe,status){
   const button=(s,fn)=>h(RN.Pressable,{key:s,onPress:fn,style:{padding:10,backgroundColor:'#404249',borderRadius:7,margin:3}},text(s));
   const options=()=>getEngine()?.options||{};
   const config=()=>shcSettings(options().shc);
+  let channelConnection;
   function resolveChannel(channelId,record){
     const fallback=record?.id===channelId?record:null;
     let live;try{live=stores.ChannelStore?.getChannel?.(channelId);}catch(_){}
@@ -925,7 +941,7 @@ function createChannelTools(api,getEngine,save,subscribe,status){
   function HiddenSettings(){useUpdates();const [open,setOpen]=React.useState(false),[browse,setBrowse]=React.useState(false),[guildSettings,setGuildSettings]=React.useState(false);
     const fix=status().hiddenChannelStats?.hiddenChannelsFix;
     if(fix?.permissions&&fix.router&&fix.fetcher)return section('ShowHiddenChannels 설정',open,setOpen,h(RN.View,null,
-      toggle('숨겨진 채널 표시','showHiddenChannels'),text('Hidden Channels Fix · 원래 위치와 Discord 기본 채널 행을 사용합니다.',{color:'#b5bac1',marginVertical:8}),
+      toggle('숨겨진 채널 표시','showHiddenChannels'),text('숨김 채널은 원래 위치에 자물쇠로 표시됩니다. 누르면 정보와 View anyway 버튼을 볼 수 있습니다.',{color:'#b5bac1',marginVertical:8}),
       text(status().hiddenChannelList||'연결 확인 중',{fontSize:11,color:'#949ba4'})));
     return section('ShowHiddenChannels 설정',open,setOpen,h(RN.View,null,
       toggle('숨겨진 채널 표시','showHiddenChannels'),
@@ -1012,12 +1028,30 @@ function createChannelTools(api,getEngine,save,subscribe,status){
             allow&&deny?text(PERMISSIONS.filter(([,bit])=>allow.has(bit)||deny.has(bit)).map(([,bit,label])=>label+': '+(allow.has(bit)?'허용':'거부')).join('\n')||'모두 기본값 (중립)',{marginTop:8}):text('권한 데이터 확인 불가',{color:'#949ba4'}));
         })):null));
   }
+  function hiddenInfo(channel,name){
+    const guild=stores.GuildStore?.getGuild?.(channel.guild_id),parent=stores.ChannelStore?.getChannel?.(channel.parent_id??channel.parentId);
+    const list=accessLists(api,channel,{...config(),showAdmin:'include'});
+    return ['서버: '+(guild?.name||channel.guild_id),'카테고리: '+(parent?.name||'없음'),'채널: '+name,'채널 ID: '+channel.id,
+      '서버 ID: '+channel.guild_id,'유형: '+(({0:'텍스트',2:'음성',5:'공지',13:'스테이지',15:'포럼',16:'미디어'})[channel.type]||channel.type),
+      '토픽: '+(channel.topic||'정보 없음'),'연령 제한 (NSFW): '+(channel.nsfw?'켜짐':'꺼짐'),...metadataLines(channel),
+      !(channel.lastMessageId??channel.last_message_id)?'최근 메시지 시각: 정보 없음':null,
+      '접근 역할: '+(list.channelRoles.map(r=>r.name||r.id).join(' · ')||'확인된 역할 없음'),
+      '관리자 역할: '+(list.adminRoles.map(r=>r.name||r.id).join(' · ')||'확인된 역할 없음'),
+      '개별 허용 멤버: '+(list.members.filter(m=>m.allowed===true).map(m=>m.user?.global_name||m.user?.username||m.id).join(' · ')||'확인된 멤버 없음'),
+      '권한 덮어쓰기: '+overwrites(channel).length+'개','채널 위치: '+(channel.position??'정보 없음'),
+      'View anyway는 채널 화면을 엽니다. 읽기 권한이 없어 메시지는 가져오지 않습니다.'].filter(Boolean).join('\n');
+  }
+  function viewAnyway(channel){
+    try{if(!channelConnection?.viewAnyway)throw Error('채널 이동 기능을 찾지 못했습니다.');
+      Promise.resolve(channelConnection.viewAnyway(channel)).catch(e=>RN.Alert?.alert?.('채널 이동 실패',String(e?.message||e)));
+    }catch(e){RN.Alert?.alert?.('채널 이동 실패',String(e?.message||e));}
+  }
   function HiddenRow({channelId,channelRecord}){useUpdates();const [open,setOpen]=React.useState(false),{channel,name}=resolveChannel(channelId,channelRecord);
-    if(!getEngine()||!isHidden(api,channel)||!displayEnabled(options(),channel))return null;
-    const icon=config().hiddenChannelIcon==='eye'?'👁':config().hiddenChannelIcon==='false'?'':'🔒';
-    const typeIcon=({0:'#',2:'🔊',5:'📢',6:'▣',13:'◉',15:'▤',16:'▧'})[channel.type]||'#';
-    return h(RN.View,null,h(RN.Pressable,{onPress:()=>setOpen(true),onLongPress:()=>setOpen(true),accessibilityLabel:'숨겨진 채널 '+name,style:{minHeight:44,paddingHorizontal:20,paddingVertical:10,flexDirection:'row',alignItems:'center'}},
-      text(typeIcon,{color:'#949ba4',fontSize:18,marginRight:8}),h(RN.Text,{numberOfLines:1,ellipsizeMode:'tail',style:{color:'#b5bac1',fontSize:16,flexGrow:1,flexShrink:1,minWidth:0}},name),text(icon,{fontSize:15,color:'#949ba4'})),
+    if(!getEngine()||!isHidden(api,channel)||!options().showHiddenChannels||options().streamMode)return null;
+    const showInfo=()=>{if(typeof RN.Alert?.alert!=='function'){setOpen(true);return;}
+      RN.Alert.alert('🔒 '+name,hiddenInfo(channel,name),[{text:'닫기',style:'cancel'},{text:'상세 정보',onPress:()=>setOpen(true)},{text:'View anyway',onPress:()=>viewAnyway(channel)}]);};
+    return h(RN.View,null,h(RN.Pressable,{onPress:showInfo,onLongPress:showInfo,accessibilityRole:'button',accessibilityLabel:'숨겨진 채널 '+name,style:{minHeight:44,paddingHorizontal:20,paddingVertical:10,flexDirection:'row',alignItems:'center'}},
+      text('🔒',{color:'#949ba4',fontSize:22,marginRight:8}),h(RN.Text,{numberOfLines:1,ellipsizeMode:'tail',style:{color:'#b5bac1',fontSize:16,fontWeight:'bold',flexGrow:1,flexShrink:1,minWidth:0}},name)),
       open?h(Detail,{channelId,channelRecord:channelRecord||channel,onClose:()=>setOpen(false)}):null);
   }
   function FancyDate({date}){
@@ -1036,7 +1070,7 @@ function createChannelTools(api,getEngine,save,subscribe,status){
         '\n\nLast message: ',(channel.lastMessageId??channel.last_message_id)?h(FancyDate,{date:snowflakeTime(channel.lastMessageId??channel.last_message_id)}):'No messages.',
         '\n\nLast pin: ',channel.lastPinTimestamp?h(FancyDate,{date:new Date(channel.lastPinTimestamp)}):'No pins.'));
   }
-  function connect(){return createNativeSHC(api,()=>options(),subscribe,channel=>h(HiddenRow,{channelId:channel.id,channelRecord:channel}),(message,stats)=>{status().hiddenChannelList=message;status().hiddenChannelStats=stats;},channel=>h(LockedChannel,{channelRecord:channel}));
+  function connect(){channelConnection=createNativeSHC(api,()=>options(),subscribe,channel=>h(HiddenRow,{channelId:channel.id,channelRecord:channel}),(message,stats)=>{status().hiddenChannelList=message;status().hiddenChannelStats=stats;},channel=>h(LockedChannel,{channelRecord:channel}));return channelConnection;
   }
   return {HiddenSettings,OtherSettings,Browser,Detail,HiddenRow,LockedChannel,FancyDate,GuildSettings,connect};
 }
@@ -1511,9 +1545,9 @@ function createPlugin(api,definePlugin) {
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
     const logs=sortArchiveRows((archive?.logs(query,kind)||[]).filter(r=>!r.localTemporary&&!isLocalTemporary(r.message)&&(kind==='sent'||r.deletedAt||verifiedEdits(archive,r.message.id).length)),archive?.options.oldestActivityFirst===true);
     const proofStats=archive?{verified:[...archive.records.values()].filter(r=>Number.isInteger(r.verifiedHistoryStart)&&r.editEvidenceSource).length,visible:[...archive.records.keys()].filter(id=>verifiedEdits(archive,id).length).length}:undefined;
-    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.5.6',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.5.7',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
     const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
-    const header=h(View,null,text('Revenge All-in-One v'+(api.pluginVersion||'0.5.6'),{fontSize:22,fontWeight:'bold'}),
+    const header=h(View,null,text('Revenge All-in-One v'+(api.pluginVersion||'0.5.7'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
       UI?h(UI.Options):null,
       channelTools?h(channelTools.HiddenSettings):null,
@@ -1822,7 +1856,7 @@ function createStablePlugin(vd,host=globalThis){
     }
     scan();return()=>{canceled=true;clearTimeout(timer);};
   }
-  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.5.6',react:{React:common.React,ReactNative:common.ReactNative},
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.5.7',react:{React:common.React,ReactNative:common.ReactNative},
     discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},permissions:{get constants(){try{return common.constants?.Permissions||{};}catch(_){return {};}}},native:{FileModule:nativeFile,moment:common.moment,waitForNativeRows,waitForNativeBridge,waitForHiddenChannelStore,waitForHiddenChannelState,waitForHiddenChannelRenderer,waitForHiddenChannelsFix,get createChannelRecord(){return vd.metro.findByProps('createChannelRecord')?.createChannelRecord;}},
       actions:{jumpToMessage,ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},

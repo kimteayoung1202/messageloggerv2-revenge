@@ -1,3 +1,7 @@
+# 0.5.7 user-requested extensions
+
+Hidden rows now use one large lock instead of the channel-type icon. Tapping opens a native metadata alert and a View anyway button. That button calls the original internal route function for the selected channel, while hidden fetches and the locked message screen stay guarded. Original placement and read state remain; ordinary rows retain the native renderer. This intentionally extends the pinned upstream behavior. Android UI/navigation remain unverified.
+
 # Hidden Channels Fix 모바일 이식 — 0.5.5
 
 기준: [cloudburst / Training Dummy 원본](https://github.com/trainingdummy/vendetta-plugins/tree/c473c13c1a5d7983d1fb45bda15fd19b14c21ead/plugins/hidden-channels), CC0 1.0.
