@@ -907,8 +907,18 @@ function createChannelTools(api,getEngine,save,subscribe,status){
       }
     }return()=>{for(const undo of cleanup)undo?.();};
   },[]);}
-  const toggle=(label,key)=>h(RN.View,{key,style:{flexDirection:'row',alignItems:'center',paddingVertical:6}},text(label,{flex:1}),h(RN.Switch,{value:!!options()[key],onValueChange:value=>{const engine=getEngine();if(engine){engine.options[key]=value;save();}}}));
-  const shcToggle=(label,key,value=config()[key],write=value=>change(key,value))=>h(RN.View,{key:label,style:{flexDirection:'row',alignItems:'center',paddingVertical:6}},text(label,{flex:1}),h(RN.Switch,{value:!!value,onValueChange:write}));
+  // The row owns touch/accessibility input; the native switch is a visual only.
+  // This also makes the label and thumb use the same controlled setting.
+  const switchRow=(label,key,value,press,write)=>h(RN.Pressable,{key,onPress:press,disabled:!getEngine(),accessibilityRole:'switch',accessibilityLabel:label,
+    accessibilityState:{checked:!!value,disabled:!getEngine()},style:{flexDirection:'row',alignItems:'center',minHeight:48,paddingVertical:6}},
+    text(label,{flex:1}),text(value?'켜짐':'꺼짐',{fontSize:12,color:'#b5bac1',marginRight:8}),
+    h(RN.View,{pointerEvents:'none',accessible:false,accessibilityElementsHidden:true,importantForAccessibility:'no-hide-descendants'},
+      h(RN.Switch,{value:!!value,accessible:false,onValueChange:write})));
+  const toggle=(label,key)=>{
+    const write=value=>{const engine=getEngine();if(engine){engine.options[key]=!!value;save();}};
+    return switchRow(label,key,options()[key],()=>write(!options()[key]),write);
+  };
+  const shcToggle=(label,key,value=config()[key],write=value=>change(key,value))=>switchRow(label,label,value,()=>write(!value),write);
   const choices=(label,key,items)=>h(RN.View,{key},text(label,{color:'#b5bac1',marginTop:12}),h(RN.View,{style:{flexDirection:'row',flexWrap:'wrap'}},...items.map(([value,name])=>button((config()[key]===value?'✓ ':'')+name,()=>change(key,value)))));
   const section=(title,open,setOpen,children)=>h(RN.View,{style:{borderTopWidth:1,borderTopColor:'#4e5058',paddingVertical:12}},button(title+(open?' 접기':' 펼치기'),()=>setOpen(!open)),open?children:null);
   function selectedGuild(){return stores.SelectedGuildStore?.getGuildId?.()||stores.ChannelStore?.getChannel?.(stores.SelectedChannelStore?.getChannelId?.())?.guild_id;}
@@ -1501,9 +1511,9 @@ function createPlugin(api,definePlugin) {
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
     const logs=sortArchiveRows((archive?.logs(query,kind)||[]).filter(r=>!r.localTemporary&&!isLocalTemporary(r.message)&&(kind==='sent'||r.deletedAt||verifiedEdits(archive,r.message.id).length)),archive?.options.oldestActivityFirst===true);
     const proofStats=archive?{verified:[...archive.records.values()].filter(r=>Number.isInteger(r.verifiedHistoryStart)&&r.editEvidenceSource).length,visible:[...archive.records.keys()].filter(id=>verifiedEdits(archive,id).length).length}:undefined;
-    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.5.5',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.5.6',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
     const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
-    const header=h(View,null,text('Revenge All-in-One v'+(api.pluginVersion||'0.5.5'),{fontSize:22,fontWeight:'bold'}),
+    const header=h(View,null,text('Revenge All-in-One v'+(api.pluginVersion||'0.5.6'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
       UI?h(UI.Options):null,
       channelTools?h(channelTools.HiddenSettings):null,
@@ -1812,7 +1822,7 @@ function createStablePlugin(vd,host=globalThis){
     }
     scan();return()=>{canceled=true;clearTimeout(timer);};
   }
-  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.5.5',react:{React:common.React,ReactNative:common.ReactNative},
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.5.6',react:{React:common.React,ReactNative:common.ReactNative},
     discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},permissions:{get constants(){try{return common.constants?.Permissions||{};}catch(_){return {};}}},native:{FileModule:nativeFile,moment:common.moment,waitForNativeRows,waitForNativeBridge,waitForHiddenChannelStore,waitForHiddenChannelState,waitForHiddenChannelRenderer,waitForHiddenChannelsFix,get createChannelRecord(){return vd.metro.findByProps('createChannelRecord')?.createChannelRecord;}},
       actions:{jumpToMessage,ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},

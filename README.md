@@ -1,4 +1,6 @@
-# Revenge All-in-One 0.5.5 — Revenge 1.11.6
+# Revenge All-in-One 0.5.6 — Revenge 1.11.6
+
+0.5.6: 숨김 채널/권한 뷰어 설정의 행 전체를 누르면 켜기·끄기가 바뀝니다. 네이티브 Switch는 터치를 가로채지 않는 상태 표시로 사용하고, 접근성 switch 상태와 켜짐·꺼짐 글씨를 함께 표시합니다. 설정 저장과 채널 목록 갱신 경로를 유지합니다. 네이티브 스위치 이벤트 없이 원본 표시 모드의 설정을 끄고 다시 켜는 회귀 테스트를 추가했습니다. 실제 Android 터치 동작은 기기 확인이 필요합니다.
 
 0.5.5: 요청한 cloudburst / Training Dummy의 [Hidden Channels Fix](https://github.com/trainingdummy/vendetta-plugins/tree/c473c13c1a5d7983d1fb45bda15fd19b14c21ead/plugins/hidden-channels)를 기준으로 표시 경로를 바꿨습니다. 커스텀 숨김 행 대신 Discord의 기본 채널 행으로 이름·기본 아이콘과 원래 위치를 사용하고 읽지 않음 상태를 별도로 억제하지 않습니다. 표시용 VIEW_CHANNEL 판정을 원본 방식으로 연결하되 실제 권한 판정은 따로 보존하여 권한 뷰어와 숨김 채널 판정에 사용합니다. 숨김 채널 메시지 요청과 transitionToGuild 이동을 막고, ChannelMessages 모듈이 발견되면 숨김 안내 화면을 표시합니다. 이 경로가 연결되면 기존 서버/종류 필터와 별도 카테고리 설정 대신 모든 서버의 받은 숨김 채널을 원래 위치에 표시합니다. All-in-One의 기능 켜기/끄기와 스트리머 모드는 유지합니다. 모듈이 아직 없으면 0.5.4 표시 경로를 유지합니다. 자동 테스트 242개 통과. 실제 Android 화면 결과는 아직 확인하지 못했습니다. 진단의 hiddenChannelStats.hiddenChannelsFix에서 permissions/router/fetcher/messages 및 nativeRows를 확인할 수 있습니다.
 

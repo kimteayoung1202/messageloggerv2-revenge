@@ -1,3 +1,4 @@
+0.5.6: The full settings row owns touch and accessibility switch state; native Switch is a pointer-events-free visual with explicit on/off text. Regression checks toggle the original native display mode off/on without invoking a native switch event. 243 automated tests passed. Android touch remains pending device verification.
 Version: 0.5.5
 Independent upstream behavior comparisons: 129 passed
 Event/state/notification scenarios: 118
