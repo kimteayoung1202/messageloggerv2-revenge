@@ -7,9 +7,9 @@
     }
   ],
   "main": "index.js",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "vendetta": {
     "icon": "ic_message"
   },
-  "hash": "70cd719b7644daf24fed57cf04502ce4c48b1364b68de914777ba8b363b66f76"
+  "hash": "463705e7806768827b9c4da055e3012ec0cd310c30288bcb33f3b571310e901f"
 }
