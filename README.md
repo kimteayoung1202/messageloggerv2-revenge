@@ -1,4 +1,8 @@
-# Message Logger Compatibility 0.4.16 — Revenge 1.11.6
+# Message Logger Compatibility 0.4.17 — Revenge 1.11.6
+
+0.4.17 (`message-logger-only` 브랜치): 삭제·일괄 삭제의 중복 갱신을 메시지 ID별로 합치고, Discord 저장소에서 이미 사라진 메시지에 MESSAGE_UPDATE를 보내지 않습니다. 삭제 기록은 보존하며 채널의 LOAD_MESSAGES_SUCCESS에서 정상 복원합니다. 플러그인을 끄면 대기 중인 갱신을 비웁니다. 삭제된 수정 이력의 subtext 중첩을 제거하고 코드 블록 등 복합 네이티브 노드를 subtext 안에 감싸지 않습니다. 일반 텍스트 이전 버전은 회색 작은 표시를 유지하며, 복합 서식은 원래 네이티브 서식과 별도 작은 수정됨 접미사를 유지합니다. 빨간 삭제 배경과 최종 본문은 유지합니다. 진단에 chatRefreshes, refreshMissingMessagesSkipped, chatRefreshError, nativeRichHistoryFallbacks가 필요할 때 표시됩니다. 모의 재현과 회귀 테스트로 검증했으며 실제 Android 간헐적 종료의 원인·해결은 기기 로그 없이 확정하지 못했습니다.
+
+설치 URL: https://raw.githubusercontent.com/kimteayoung1202/messageloggerv2-revenge/message-logger-only/
 
 MessageLoggerV2 1.10.4의 메시지 처리 동작을 기준으로 작성한 독립 구현입니다.
 원본 코드를 포함하거나 재배포하지 않습니다. 공식 MLV2 배포물도 아닙니다.

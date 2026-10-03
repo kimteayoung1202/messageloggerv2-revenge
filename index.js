@@ -44,6 +44,7 @@ function importData(input,userId){
 }
 module.exports={snapshot,clone,cleanEmbed,importData};
 
+
 },
 "./engine":function(module,exports,require){
 'use strict';
@@ -318,6 +319,7 @@ class Engine {
 }
 module.exports={Engine,BASE,settings,normal};
 
+
 },
 "./ui":function(module,exports,require){
 'use strict';
@@ -399,6 +401,7 @@ function createUI(api,getEngine,save,refresh,backup,getStatus){
   return {Options,Actions};
 }
 module.exports={createUI,sortArchiveRows};
+
 
 },
 "./io":function(module,exports,require){
@@ -513,6 +516,7 @@ async function fetchData(url,limit,signal) {
 }
 module.exports={Journal,MediaCache,allowedUrl,fetchData};
 
+
 },
 "./plugin":function(module,exports,require){
 'use strict';
@@ -525,6 +529,7 @@ function createPlugin(api,definePlugin) {
   let React,RN,stores,archive,journal,media,timer,base,UI,maintenanceTimer,backupTimer,selfTestTimer,fetchActions,started=false,dirty=false;
   let diagnostics={nativeTextShape:'아직 수집되지 않음'},lastTest=0,stopping=false;const fetchTimes=new Map(),nativeSeen=new Map(),nativeRenderedSeen=new Map(),nativeRecordBefore=new Map(),temporaryIds=new Set(),temporaryRecords=new Map(),nativeContentSeen=new Map(),nativePainted=new Map();
   let status='시작 대기',inlineReady=false,unpatches=[],listeners=new Set();
+  const pendingRefresh=new Set();let refreshScheduled=false;
   const notify=()=>{for(const cb of listeners)cb();};
   const error=e=>{status=String(e?.message||e);notify();console.error('[Message Archive]',e);};
   const save=()=>{
@@ -567,14 +572,29 @@ function createPlugin(api,definePlugin) {
   function refreshChat(id){notify();if(!id)return;const r=archive.records.get(id);if(!r)return;
     if(r.localTemporary||isLocalTemporary(r.message))return;
     if(!r.deletedAt&&!verifiedEdits(archive,id).length)return;
+    // Typed Flux listeners run after Discord has already removed the message.
+    // MESSAGE_UPDATE cannot resurrect that missing record; retain it in the
+    // archive and let LOAD_MESSAGES_SUCCESS restore it through the normal path.
+    const live=previous(id,r.message.channel_id);
+    if(!live||isLocalTemporary(live)){
+      diagnostics.refreshMissingMessagesSkipped=(diagnostics.refreshMissingMessagesSkipped||0)+1;return;
+    }
     const event=r.hidden?{type:'MESSAGE_DELETE',id,channelId:r.message.channel_id,ML2:true}:{type:'MESSAGE_UPDATE',message:localAttachments(r.message),__loggerReplay:true};
-    try{api.discord.common?.flux?.Dispatcher?.dispatch?.(event);}catch(_){}
+    try{api.discord.common?.flux?.Dispatcher?.dispatch?.(event);diagnostics.chatRefreshes=(diagnostics.chatRefreshes||0)+1;}
+    catch(e){diagnostics.chatRefreshError=String(e?.message||e);}
+  }
+  function scheduleRefresh(id){
+    if(!id)return;pendingRefresh.add(id);if(refreshScheduled)return;refreshScheduled=true;
+    Promise.resolve().then(()=>{
+      refreshScheduled=false;const ids=[...pendingRefresh];pendingRefresh.clear();
+      if(started)for(const id of ids)refreshChat(id);
+    });
   }
   function effect(items){for(const item of items){
     if(item.type==='changed')save();
     else if(item.type==='cacheMedia')cacheAttachments(item.message);
     else if(item.type==='selfTest')lastTest=Date.now();
-    else if(item.type==='refresh')Promise.resolve().then(()=>{if(started)refreshChat(item.messageId);});
+    else if(item.type==='refresh')scheduleRefresh(item.messageId);
     else if(item.type==='prefetch'&&fetchActions?.fetchMessages&&Date.now()-(fetchTimes.get(item.channelId)||0)>10000){
       fetchTimes.set(item.channelId,Date.now());Promise.resolve().then(()=>fetchActions.fetchMessages({channelId:item.channelId,limit:50})).catch(error);
     }else if(item.type==='notification'){
@@ -629,7 +649,11 @@ function createPlugin(api,definePlugin) {
     const tag=modifier.noSuffix?null:{...clone(suffix),content:[{type:'text',content:' (수정됨)'}]};
     // Native subtext supplies muted text and terminates each historical line.
     // Current content stays outside the span with its original size and color.
-    if(deleted)return [{type:'subtext',content:[...body,...(tag?[tag]:[])]}];
+    if(deleted&&body.every(node=>node?.type==='text'&&typeof node.content==='string'))
+      return [{...clone(suffix),content:[...body,...(tag?tag.content:[])]}];
+    // Keep code blocks, lists, quotes, embeds and already parsed rich spans at
+    // their native level. Never place block AST or another subtext inside subtext.
+    if(deleted)diagnostics.nativeRichHistoryFallbacks=(diagnostics.nativeRichHistoryFallbacks||0)+1;
     return [...body,tag||{type:'text',content:'\n'}];
   }
   function markTemporary(id){
@@ -980,9 +1004,9 @@ function createPlugin(api,definePlugin) {
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
     const logs=sortArchiveRows((archive?.logs(query,kind)||[]).filter(r=>!r.localTemporary&&!isLocalTemporary(r.message)&&(kind==='sent'||r.deletedAt||verifiedEdits(archive,r.message.id).length)),archive?.options.oldestActivityFirst===true);
     const proofStats=archive?{verified:[...archive.records.values()].filter(r=>Number.isInteger(r.verifiedHistoryStart)&&r.editEvidenceSource).length,visible:[...archive.records.keys()].filter(id=>verifiedEdits(archive,id).length).length}:undefined;
-    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.16',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.17',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
     const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
-    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.16'),{fontSize:22,fontWeight:'bold'}),
+    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.17'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
       text('실제 화면 호출: updateRows '+(diagnostics.nativeBridgeMessageRows||0)+' · RowManager '+(diagnostics.nativeRowsGenerated||0)+' · 레코드 갱신 '+(diagnostics.nativeRecordUpdatesSeen||0),{color:'#949ba4',fontSize:12}),
       h(View,{style:{flexDirection:'row'}},button('연결 진단 보기',()=>setDiagnosticOpen(true)),button('진단 복사',copyDiagnostic)),
@@ -1101,7 +1125,7 @@ function createPlugin(api,definePlugin) {
           }
           effect(out.effects);
           if(out.event===null&&type!=='MESSAGE_LOGGER_V2_SELF_TEST'&&(!inlineReady||!archive.options.inlineEnabled||archive.options.streamMode))return e;
-          if(out.event===null&&type!=='MESSAGE_LOGGER_V2_SELF_TEST')Promise.resolve().then(()=>{if(started)for(const id of (type==='MESSAGE_DELETE_BULK'?e.ids:[e.id]))refreshChat(id);});
+          if(out.event===null&&type!=='MESSAGE_LOGGER_V2_SELF_TEST')for(const id of (type==='MESSAGE_DELETE_BULK'?e.ids||[]:[e.id]))scheduleRefresh(id);
           if(type==='LOAD_MESSAGES_SUCCESS'&&out.event?.messages)out.event={...out.event,messages:out.event.messages.filter(m=>!archive.records.get(m.id)?.localTemporary&&!isLocalTemporary(m)).map(m=>archive.records.has(m.id)?localAttachments(m):m)};
           if(pending.length)return out.event===null?{...e,ids:pending}:e;
           return out.event;
@@ -1112,7 +1136,7 @@ function createPlugin(api,definePlugin) {
         notify();
       }catch(e){await lifecycle.stop();throw e;}
     },
-    async stop(){started=false;stopping=true;inlineReady=false;for(const t of [maintenanceTimer,selfTestTimer,backupTimer])if(t)clearInterval(t);maintenanceTimer=selfTestTimer=backupTimer=null;for(const undo of unpatches.splice(0))try{undo();}catch(_){}
+    async stop(){started=false;stopping=true;inlineReady=false;pendingRefresh.clear();for(const t of [maintenanceTimer,selfTestTimer,backupTimer])if(t)clearInterval(t);maintenanceTimer=selfTestTimer=backupTimer=null;for(const undo of unpatches.splice(0))try{undo();}catch(_){}
       media?.stop();await flush();status='기록 중지';notify();},
     SettingsComponent,
   };
@@ -1223,7 +1247,7 @@ function createStablePlugin(vd,host=globalThis){
     const guildId=message.guild_id||stores.ChannelStore?.getChannel?.(channelId)?.guild_id||'@me';
     return handle.call(linking,{guildId,channelId,messageId,navigationSettings:{navigationReplace:true}});
   }
-  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.16',react:{React:common.React,ReactNative:common.ReactNative},
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.17',react:{React:common.React,ReactNative:common.ReactNative},
     discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},native:{FileModule:nativeFile,waitForNativeRows,waitForNativeBridge},
       actions:{jumpToMessage,ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},
@@ -1247,6 +1271,7 @@ function createStablePlugin(vd,host=globalThis){
   };
 }
 module.exports={createStablePlugin};
+
 
 },
 "./mobile":function(module,exports,require){
