@@ -1,4 +1,6 @@
-# Message Logger Compatibility 0.4.17 — Revenge 1.11.6
+# Message Logger Compatibility 0.4.18 — Revenge 1.11.6
+
+0.4.18 hotfix: 0.4.17에서 추가한 MessageStore 조회 실패 시 화면 갱신 중단 조건을 철회합니다. 네이티브 행이 남아 있어도 어댑터 저장소 조회가 실패할 수 있으므로 이전의 갱신 이벤트 전달을 유지합니다. 전송 대기/실패 행 제외, ID별 중복 갱신 합치기, 삭제 이력 subtext 중첩 제거는 유지합니다. 저장소 조회 불가 상태에서 수정·삭제된 네이티브 행의 갱신과 표시를 검증하는 재현 테스트는 배포된 0.4.17 코드에서 실패하고 수정본에서 통과합니다. 전체 215개 테스트 통과. 진단의 chatRefreshStoreMisses는 조회 실패에도 전달한 갱신 횟수이며 chatRefreshError는 동기 전달 오류입니다. 실제 Android 동작은 사용자 기기 확인이 필요합니다.
 
 0.4.17 (`message-logger-only` 브랜치): 삭제·일괄 삭제의 중복 갱신을 메시지 ID별로 합치고, Discord 저장소에서 이미 사라진 메시지에 MESSAGE_UPDATE를 보내지 않습니다. 삭제 기록은 보존하며 채널의 LOAD_MESSAGES_SUCCESS에서 정상 복원합니다. 플러그인을 끄면 대기 중인 갱신을 비웁니다. 삭제된 수정 이력의 subtext 중첩을 제거하고 코드 블록 등 복합 네이티브 노드를 subtext 안에 감싸지 않습니다. 일반 텍스트 이전 버전은 회색 작은 표시를 유지하며, 복합 서식은 원래 네이티브 서식과 별도 작은 수정됨 접미사를 유지합니다. 빨간 삭제 배경과 최종 본문은 유지합니다. 진단에 chatRefreshes, refreshMissingMessagesSkipped, chatRefreshError, nativeRichHistoryFallbacks가 필요할 때 표시됩니다. 모의 재현과 회귀 테스트로 검증했으며 실제 Android 간헐적 종료의 원인·해결은 기기 로그 없이 확정하지 못했습니다.
 

@@ -572,13 +572,12 @@ function createPlugin(api,definePlugin) {
   function refreshChat(id){notify();if(!id)return;const r=archive.records.get(id);if(!r)return;
     if(r.localTemporary||isLocalTemporary(r.message))return;
     if(!r.deletedAt&&!verifiedEdits(archive,id).length)return;
-    // Typed Flux listeners run after Discord has already removed the message.
-    // MESSAGE_UPDATE cannot resurrect that missing record; retain it in the
-    // archive and let LOAD_MESSAGES_SUCCESS restore it through the normal path.
+    // Store lookup is not a visibility signal on the native renderer. A retained
+    // row can be visible even when this adapter cannot find its MessageRecord.
+    // Keep the pre-0.4.18 replay behavior rather than silently dropping repaint.
     const live=previous(id,r.message.channel_id);
-    if(!live||isLocalTemporary(live)){
-      diagnostics.refreshMissingMessagesSkipped=(diagnostics.refreshMissingMessagesSkipped||0)+1;return;
-    }
+    if(isLocalTemporary(live))return;
+    if(!live)diagnostics.chatRefreshStoreMisses=(diagnostics.chatRefreshStoreMisses||0)+1;
     const event=r.hidden?{type:'MESSAGE_DELETE',id,channelId:r.message.channel_id,ML2:true}:{type:'MESSAGE_UPDATE',message:localAttachments(r.message),__loggerReplay:true};
     try{api.discord.common?.flux?.Dispatcher?.dispatch?.(event);diagnostics.chatRefreshes=(diagnostics.chatRefreshes||0)+1;}
     catch(e){diagnostics.chatRefreshError=String(e?.message||e);}
@@ -1004,9 +1003,9 @@ function createPlugin(api,definePlugin) {
       text(label,{flex:1}),h(Switch,{value:!!archive?.options[key],disabled:!started,onValueChange:v=>{archive.options[key]=v;save();}}));
     const logs=sortArchiveRows((archive?.logs(query,kind)||[]).filter(r=>!r.localTemporary&&!isLocalTemporary(r.message)&&(kind==='sent'||r.deletedAt||verifiedEdits(archive,r.message.id).length)),archive?.options.oldestActivityFirst===true);
     const proofStats=archive?{verified:[...archive.records.values()].filter(r=>Number.isInteger(r.verifiedHistoryStart)&&r.editEvidenceSource).length,visible:[...archive.records.keys()].filter(id=>verifiedEdits(archive,id).length).length}:undefined;
-    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.17',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
+    const diagnosticText=JSON.stringify({version:api.pluginVersion||'0.4.18',status,started,inlineReady,...diagnostics,stats:archive?.stats(),editProof:proofStats},null,2);
     const copyDiagnostic=()=>{if(api.clipboard?.setString){api.clipboard.setString(diagnosticText);status='진단 복사됨';notify();}else if(RN.Clipboard?.setString){RN.Clipboard.setString(diagnosticText);}else RN.Share?.share?.({message:diagnosticText}).catch(error);};
-    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.17'),{fontSize:22,fontWeight:'bold'}),
+    const header=h(View,null,text('Message Archive v'+(api.pluginVersion||'0.4.18'),{fontSize:22,fontWeight:'bold'}),
       text(status,{color:'#b5bac1',marginVertical:10}),
       text('실제 화면 호출: updateRows '+(diagnostics.nativeBridgeMessageRows||0)+' · RowManager '+(diagnostics.nativeRowsGenerated||0)+' · 레코드 갱신 '+(diagnostics.nativeRecordUpdatesSeen||0),{color:'#949ba4',fontSize:12}),
       h(View,{style:{flexDirection:'row'}},button('연결 진단 보기',()=>setDiagnosticOpen(true)),button('진단 복사',copyDiagnostic)),
@@ -1247,7 +1246,7 @@ function createStablePlugin(vd,host=globalThis){
     const guildId=message.guild_id||stores.ChannelStore?.getChannel?.(channelId)?.guild_id||'@me';
     return handle.call(linking,{guildId,channelId,messageId,navigationSettings:{navigationReplace:true}});
   }
-  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.17',react:{React:common.React,ReactNative:common.ReactNative},
+  const api={clipboard:common.clipboard,pluginVersion:vd.plugin?.manifest?.version||'0.4.18',react:{React:common.React,ReactNative:common.ReactNative},
     discord:{flux:{Stores:stores,onFluxEventDispatched:subscribe,mode:typeof common.FluxDispatcher.subscribe==='function'?'dispatch + typed subscriptions':'dispatch'},common:{flux:{Dispatcher:common.FluxDispatcher}},native:{FileModule:nativeFile,waitForNativeRows,waitForNativeBridge},
       actions:{jumpToMessage,ToastActionCreators:{open:({content})=>vd.ui.toasts.showToast(content)}}},
     modules:{native:{fs:nativeFile?nativeFs:undefined},finders},
